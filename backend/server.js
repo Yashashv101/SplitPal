@@ -162,11 +162,20 @@ app.post('/api/groups/:id/members', async (req, res) => {
 // Add an expense to a group
 app.post('/api/groups/:id/expenses', async (req, res) => {
   const groupId = req.params.id;
-  const { description, amount, paid_by: payer_id, participants } = req.body;
+  const { description, amount, paid_by, participants } = req.body;
+
+  console.log('Received expense data:', req.body);
 
   // Validate request
-  if (!description || !amount || !payer_id || !participants || participants.length === 0) {
-    return res.status(400).json({ error: 'Missing required fields' });
+  if (!description || !amount || !paid_by) {
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      received: { description, amount, paid_by, participants }
+    });
+  }
+
+  if (!participants || participants.length === 0) {
+    return res.status(400).json({ error: 'At least one participant is required' });
   }
   
   const connection = await pool.getConnection();
@@ -174,14 +183,16 @@ app.post('/api/groups/:id/expenses', async (req, res) => {
   try {
     await connection.beginTransaction();
     
-    // Insert expense
+    // Insert expense (note: using paid_by from request, storing as payer_id in DB)
     const [expenseResult] = await connection.query(
       'INSERT INTO expenses (description, amount, payer_id, group_id, date) VALUES (?, ?, ?, ?, CURDATE())',
-    [description, amount, payer_id, groupId]
+      [description, parseFloat(amount), paid_by, groupId]
     );
     
     const expenseId = expenseResult.insertId;
-    const shareAmount = amount / participants.length;
+    const shareAmount = parseFloat(amount) / participants.length;
+    
+    console.log(`Expense ID: ${expenseId}, Share amount: ${shareAmount} for ${participants.length} participants`);
     
     // Insert expense shares
     for (const participantId of participants) {
@@ -193,12 +204,24 @@ app.post('/api/groups/:id/expenses', async (req, res) => {
     
     await connection.commit();
     
-    const [newExpense] = await connection.query('SELECT * FROM expenses WHERE id = ?', [expenseId]);
+    // Fetch the created expense with payer name
+    const [newExpense] = await connection.query(`
+      SELECT e.*, m.name as paid_by_name 
+      FROM expenses e
+      JOIN members m ON e.payer_id = m.id
+      WHERE e.id = ?
+    `, [expenseId]);
+    
+    console.log('Expense created successfully:', newExpense[0]);
+    
     res.status(201).json(newExpense[0]);
   } catch (error) {
     await connection.rollback();
     console.error('Error adding expense:', error);
-    res.status(500).json({ error: 'Failed to add expense' });
+    res.status(500).json({ 
+      error: 'Failed to add expense',
+      details: error.message 
+    });
   } finally {
     connection.release();
   }
@@ -281,23 +304,51 @@ app.get('/api/groups/:id/balances', async (req, res) => {
 // Add a settlement to a group
 app.post('/api/groups/:id/settlements', async (req, res) => {
   const groupId = req.params.id;
-  const { paid_by: payer_id, paid_to, amount } = req.body;
+  const { paid_by, paid_to, amount } = req.body;
 
-  if (!payer_id || !paid_to || !amount) {
-    return res.status(400).json({ error: 'Missing required fields' });
+  console.log('Received settlement data:', req.body);
+
+  // Validation
+  if (!paid_by || !paid_to || !amount) {
+    return res.status(400).json({ 
+      error: 'Missing required fields',
+      received: { paid_by, paid_to, amount }
+    });
+  }
+
+  if (paid_by === paid_to) {
+    return res.status(400).json({ error: 'Cannot settle with yourself' });
+  }
+
+  if (parseFloat(amount) <= 0) {
+    return res.status(400).json({ error: 'Amount must be greater than 0' });
   }
   
   try {
     const [result] = await pool.query(
       'INSERT INTO settlements (payer_id, receiver_id, amount, group_id, date) VALUES (?, ?, ?, ?, CURDATE())',
-    [payer_id, paid_to, amount, groupId]
+      [parseInt(paid_by), parseInt(paid_to), parseFloat(amount), groupId]
     );
     
-    const [newSettlement] = await pool.query('SELECT * FROM settlements WHERE id = ?', [result.insertId]);
+    const [newSettlement] = await pool.query(`
+      SELECT s.*, 
+             m1.name as payer_name, 
+             m2.name as receiver_name
+      FROM settlements s
+      JOIN members m1 ON s.payer_id = m1.id
+      JOIN members m2 ON s.receiver_id = m2.id
+      WHERE s.id = ?
+    `, [result.insertId]);
+    
+    console.log('Settlement created successfully:', newSettlement[0]);
+    
     res.status(201).json(newSettlement[0]);
   } catch (error) {
     console.error('Error adding settlement:', error);
-    res.status(500).json({ error: 'Failed to add settlement' });
+    res.status(500).json({ 
+      error: 'Failed to add settlement',
+      details: error.message 
+    });
   }
 });
 
@@ -351,26 +402,62 @@ app.post('/api/ocr/bill', upload.single('bill'), async (req, res) => {
 
   try {
     const { path } = req.file;
-    const { data: { text } } = await Tesseract.recognize(path, 'eng');
+    const { data: { text } } = await Tesseract.recognize(path, 'eng', {
+      logger: m => console.log(m)
+    });
 
     // Split text into lines
     const lines = text.split('\n').map(line => line.trim()).filter(line => line);
 
-    // Extract items and amounts using regex
+    // Extract items and amounts using improved regex
     const items = [];
-    const amountRegex = /\d+(\.\d{1,2})?/; // Matches numbers with optional decimals
+    const amountRegex = /(\$)?\s*(\d+[.,]\d{2}|\d+)/; // Better price detection
+    const totalRegex = /(total|sum|amount|subtotal).*?(\$)?\s*(\d+[.,]\d{2}|\d+)/i;
+    
+    let totalAmount = 0;
 
+    // First try to find a total
+    for (const line of lines) {
+      const totalMatch = line.match(totalRegex);
+      if (totalMatch) {
+        const amount = parseFloat(totalMatch[3].replace(',', '.'));
+        if (!isNaN(amount) && amount > 0) {
+          totalAmount = amount;
+          break;
+        }
+      }
+    }
+
+    // Then extract individual items
     lines.forEach(line => {
+      // Skip lines that are likely headers or footers
+      if (line.match(/(receipt|invoice|order|date|time|thank you)/i)) {
+        return;
+      }
+      
       const match = line.match(amountRegex);
       if (match) {
-        const amount = parseFloat(match[0]);
-        const description = line.replace(match[0], '').trim() || 'Item';
-        items.push({ description, amount });
+        const amount = parseFloat(match[2].replace(',', '.'));
+        if (!isNaN(amount) && amount > 0) {
+          // Extract description - everything before the price
+          let description = line.substring(0, match.index).trim();
+          if (!description) {
+            description = 'Item';
+          }
+          items.push({ description, amount });
+        }
       }
     });
-
-    // Calculate total
-    const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+    
+    // Calculate total from items if no total was found
+    if (totalAmount === 0 && items.length > 0) {
+      totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+    }
+    
+    return res.json({ 
+      items, 
+      totalAmount 
+    });
 
     res.json({
       items,           // List of items for preview

@@ -71,49 +71,147 @@ function GroupDetailPage() {
   const addExpense = async (e) => {
   e.preventDefault();
 
-  try {
-    // Combine OCR items into description string
-    const description = ocrItems.map(item => `${item.description} (${item.amount})`).join(', ');
+  // Validation
+  if (!expenseData.description.trim()) {
+    alert('Please enter a description');
+    return;
+  }
 
-    await axios.post(`${API_URL}/groups/${groupId}/expenses`, {
-      ...expenseData,
-      description
-    });
+  if (!expenseData.amount || parseFloat(expenseData.amount) <= 0) {
+    alert('Please enter a valid amount');
+    return;
+  }
+
+  if (!expenseData.paid_by) {
+    alert('Please select who paid for this expense');
+    return;
+  }
+
+  try {
+    let finalDescription = expenseData.description;
+    
+    // If we have OCR items, include them in description
+    if (ocrItems.length > 0) {
+      const itemsList = ocrItems
+        .map(item => `${item.description}: ₹${item.amount.toFixed(2)}`)
+        .join(', ');
+      finalDescription = `${expenseData.description} [${itemsList}]`;
+    }
+
+    // Create expense object with correct field names
+    const newExpense = {
+      description: finalDescription,
+      amount: parseFloat(expenseData.amount),
+      paid_by: parseInt(expenseData.paid_by), // Ensure it's a number
+      participants: expenseData.participants.length > 0 
+        ? expenseData.participants.map(id => parseInt(id)) // Ensure IDs are numbers
+        : members.map(m => parseInt(m.id))
+    };
+
+    console.log('Submitting expense:', newExpense);
+    console.log('To URL:', `${API_URL}/groups/${groupId}/expenses`);
+
+    const response = await axios.post(`${API_URL}/groups/${groupId}/expenses`, newExpense);
+    
+    console.log('Expense added successfully:', response.data);
 
     // Reset states
-    setExpenseData({ description: '', amount: '', paid_by: '', participants: [] });
+    setExpenseData({ 
+      description: '', 
+      amount: '', 
+      paid_by: '', 
+      participants: [] 
+    });
     setOcrItems([]);
     setShowAddExpenseModal(false);
 
-    fetchGroupDetails();
-    fetchBalances();
+    // Refresh group details and balances
+    await fetchGroupDetails();
+    await fetchBalances();
+
+    alert('Expense added successfully!');
+
   } catch (error) {
     console.error('Error adding expense:', error);
+    console.error('Error response:', error.response?.data);
+    
+    const errorMessage = error.response?.data?.error 
+      || error.response?.data?.details 
+      || error.message 
+      || 'Unknown error occurred';
+    
+    alert('Failed to add expense: ' + errorMessage);
   }
 };
 
 
   const settleUp = async (e) => {
-    e.preventDefault();
-    
-    try {
-      await axios.post(`${API_URL}/groups/${groupId}/settlements`, settlementData);
-      setSettlementData({
-        paid_by: '',
-        paid_to: '',
-        amount: ''
-      });
-      setShowSettleModal(false);
-      // Refresh both balances and group details
-      fetchBalances();
-      fetchGroupDetails();
-    } catch (error) {
-      console.error('Error settling up:', error);
-    }
-  };
+  e.preventDefault();
+  
+  // Validation
+  if (!settlementData.paid_by) {
+    alert('Please select who paid');
+    return;
+  }
 
-  const handleBillUpload = async (file) => {
+  if (!settlementData.paid_to) {
+    alert('Please select who received the payment');
+    return;
+  }
+
+  if (!settlementData.amount || parseFloat(settlementData.amount) <= 0) {
+    alert('Please enter a valid amount');
+    return;
+  }
+
+  if (settlementData.paid_by === settlementData.paid_to) {
+    alert('Cannot settle with yourself');
+    return;
+  }
+
+  try {
+    console.log('Submitting settlement:', settlementData);
+
+    const response = await axios.post(`${API_URL}/groups/${groupId}/settlements`, {
+      paid_by: parseInt(settlementData.paid_by),
+      paid_to: parseInt(settlementData.paid_to),
+      amount: parseFloat(settlementData.amount)
+    });
+
+    console.log('Settlement response:', response.data);
+
+    // Reset form
+    setSettlementData({
+      paid_by: '',
+      paid_to: '',
+      amount: ''
+    });
+    setShowSettleModal(false);
+    
+    // Refresh data
+    await fetchBalances();
+    await fetchGroupDetails();
+
+    alert('Settlement recorded successfully!');
+  } catch (error) {
+    console.error('Error settling up:', error);
+    console.error('Error response:', error.response?.data);
+    
+    const errorMessage = error.response?.data?.error 
+      || error.response?.data?.details 
+      || error.message 
+      || 'Unknown error occurred';
+    
+    alert('Failed to record settlement: ' + errorMessage);
+  }
+};
+
+
+  const handleBillUpload = async (e) => {
+  const file = e.target.files[0];
   if (!file) return;
+
+  console.log('Uploading bill for OCR processing...');
 
   const formData = new FormData();
   formData.append('bill', file);
@@ -123,17 +221,30 @@ function GroupDetailPage() {
       headers: { 'Content-Type': 'multipart/form-data' }
     });
 
-    // Show preview of items for confirmation
-    setOcrItems(response.data.items || []);
+    console.log('OCR Response:', response.data);
 
-    // Autofill total amount
+    const extractedItems = response.data.items || [];
+    const totalAmount = response.data.totalAmount || 0;
+
+    // Set OCR items for preview
+    setOcrItems(extractedItems);
+
+    // Autofill description and amount
     setExpenseData({
       ...expenseData,
-      amount: response.data.totalAmount || 0
+      amount: totalAmount.toFixed(2),
+      description: extractedItems.length > 0 
+        ? (extractedItems.length === 1 
+            ? extractedItems[0].description 
+            : `Bill with ${extractedItems.length} items`)
+        : expenseData.description
     });
+
+    alert(`Successfully extracted ${extractedItems.length} items from bill!`);
 
   } catch (error) {
     console.error('Error processing OCR:', error);
+    alert('Failed to process bill. Please enter details manually.');
   }
 };
 
@@ -300,12 +411,13 @@ function GroupDetailPage() {
         </div>
       )}
 
-      {/* Add Expense Modal */}
       {showAddExpenseModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">Add Expense</h2>
             <form onSubmit={addExpense}>
+              
+              {/* Bill Upload Section */}
               <div className="mb-4">
                 <label htmlFor="billUpload" className="block text-gray-700 mb-2">
                   Upload Bill (optional)
@@ -314,50 +426,114 @@ function GroupDetailPage() {
                   type="file"
                   id="billUpload"
                   accept="image/*"
-                  onChange={(e) => handleBillUpload(e.target.files[0])}
-                  className="form-input"
+                  onChange={handleBillUpload}
+                  className="form-input w-full"
                 />
+                <p className="text-xs text-gray-500 mt-1">Upload a bill image to auto-extract items</p>
               </div>
+
+              {/* OCR Items Preview */}
+              {ocrItems.length > 0 && (
+                <div className="mb-4 bg-gray-50 p-3 rounded border">
+                  <h3 className="font-semibold mb-2 text-sm">Extracted Items (editable)</h3>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {ocrItems.map((item, index) => (
+                      <div key={index} className="flex gap-2">
+                        <input
+                          type="text"
+                          value={item.description}
+                          onChange={(e) => {
+                            const updatedItems = [...ocrItems];
+                            updatedItems[index].description = e.target.value;
+                            setOcrItems(updatedItems);
+                          }}
+                          className="flex-1 border rounded px-2 py-1 text-sm"
+                          placeholder="Item description"
+                        />
+                        <input
+                          type="number"
+                          value={item.amount}
+                          min="0.01"
+                          step="0.01"
+                          onChange={(e) => {
+                            const updatedItems = [...ocrItems];
+                            updatedItems[index].amount = parseFloat(e.target.value) || 0;
+                            setOcrItems(updatedItems);
+                            // Recalculate total
+                            const newTotal = updatedItems.reduce((sum, i) => sum + (i.amount || 0), 0);
+                            setExpenseData({
+                              ...expenseData, 
+                              amount: newTotal.toFixed(2)
+                            });
+                          }}
+                          className="w-24 border rounded px-2 py-1 text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updatedItems = ocrItems.filter((_, i) => i !== index);
+                            setOcrItems(updatedItems);
+                            // Recalculate total
+                            const newTotal = updatedItems.reduce((sum, i) => sum + (i.amount || 0), 0);
+                            setExpenseData({
+                              ...expenseData, 
+                              amount: newTotal > 0 ? newTotal.toFixed(2) : expenseData.amount
+                            });
+                          }}
+                          className="text-red-500 hover:text-red-700 px-2"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              {/* Description Input */}
               <div className="mb-4">
                 <label htmlFor="description" className="block text-gray-700 mb-2">
-                  Description
+                  Description *
                 </label>
                 <input
                   type="text"
                   id="description"
                   value={expenseData.description}
                   onChange={(e) => setExpenseData({...expenseData, description: e.target.value})}
-                  className="form-input"
+                  className="form-input w-full"
                   placeholder="What was this expense for?"
                   required
                 />
               </div>
 
+              {/* Amount Input */}
               <div className="mb-4">
                 <label htmlFor="amount" className="block text-gray-700 mb-2">
-                  Amount (₹)
+                  Amount (₹) *
                 </label>
                 <input
                   type="number"
                   id="amount"
                   value={expenseData.amount}
                   onChange={(e) => setExpenseData({...expenseData, amount: e.target.value})}
-                  className="form-input"
+                  className="form-input w-full"
                   placeholder="0.00"
                   min="0.01"
                   step="0.01"
                   required
                 />
               </div>
+
+              {/* Paid By Selection */}
               <div className="mb-4">
                 <label htmlFor="paidBy" className="block text-gray-700 mb-2">
-                  Paid By
+                  Paid By *
                 </label>
                 <select
                   id="paidBy"
                   value={expenseData.paid_by}
                   onChange={(e) => setExpenseData({...expenseData, paid_by: e.target.value})}
-                  className="form-input"
+                  className="form-input w-full"
                   required
                 >
                   <option value="">Select a member</option>
@@ -366,11 +542,13 @@ function GroupDetailPage() {
                   ))}
                 </select>
               </div>
+
+              {/* Split Between */}
               <div className="mb-4">
                 <label className="block text-gray-700 mb-2">
-                  Split Between
+                  Split Between (leave empty for all members)
                 </label>
-                <div className="space-y-2 max-h-40 overflow-y-auto">
+                <div className="space-y-2 max-h-40 overflow-y-auto border rounded p-2">
                   {members.map((member) => (
                     <div key={member.id} className="flex items-center">
                       <input
@@ -380,15 +558,34 @@ function GroupDetailPage() {
                         onChange={() => handleExpenseParticipantChange(member.id)}
                         className="mr-2"
                       />
-                      <label htmlFor={`participant-${member.id}`}>{member.name}</label>
+                      <label htmlFor={`participant-${member.id}`} className="cursor-pointer">
+                        {member.name}
+                      </label>
                     </div>
                   ))}
                 </div>
+                {expenseData.participants.length > 0 && (
+                  <p className="text-xs text-gray-500 mt-1">
+                    Split between {expenseData.participants.length} member(s): 
+                    ₹{(parseFloat(expenseData.amount || 0) / expenseData.participants.length).toFixed(2)} each
+                  </p>
+                )}
               </div>
-              <div className="flex justify-end space-x-2">
+
+              {/* Form Actions */}
+              <div className="flex justify-end space-x-2 mt-6">
                 <button
                   type="button"
-                  onClick={() => setShowAddExpenseModal(false)}
+                  onClick={() => {
+                    setShowAddExpenseModal(false);
+                    setOcrItems([]);
+                    setExpenseData({
+                      description: '',
+                      amount: '',
+                      paid_by: '',
+                      participants: []
+                    });
+                  }}
                   className="btn btn-secondary"
                 >
                   Cancel
@@ -405,108 +602,104 @@ function GroupDetailPage() {
         </div>
       )}
 
-      {/* Settle Up Modal */}
       {showSettleModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg p-6 w-full max-w-md">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">Settle Up</h2>
-            {balances.length === 0 ? (
-              <div>
-                <p className="text-gray-700 mb-4">No balances to settle up.</p>
-                <button
-                  type="button"
-                  onClick={() => setShowSettleModal(false)}
-                  className="btn btn-secondary w-full"
-                >
-                  Close
-                </button>
+            
+            {/* Show current balances for reference */}
+            <div className="mb-4 bg-gray-50 p-3 rounded border">
+              <h3 className="font-semibold mb-2 text-sm">Current Balances:</h3>
+              <div className="space-y-2 max-h-48 overflow-y-auto text-sm">
+                {members.map(member => {
+                  const balance = balances[member.id] || { paid: 0, getsBack: 0, owes: [] };
+                  const netBalance = balance.getsBack - balance.owes.reduce((sum, o) => sum + o.amount, 0);
+                  
+                  return (
+                    <div key={member.id} className="flex justify-between items-center">
+                      <span className="font-medium">{member.name}</span>
+                      <span className={netBalance > 0 ? 'text-green-600' : netBalance < 0 ? 'text-red-600' : 'text-gray-600'}>
+                        {netBalance > 0 ? `+₹${netBalance.toFixed(2)}` : 
+                        netBalance < 0 ? `-₹${Math.abs(netBalance).toFixed(2)}` : 
+                        'Settled'}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
-            ) : (
-              <form onSubmit={settleUp}>
-                <div className="mb-4">
-                  <p className="text-sm text-gray-600 mb-2">Select a balance to settle:</p>
-                  <div className="space-y-2 mb-4 border p-3 rounded max-h-40 overflow-y-auto">
-                    {members.map(member => {
-                      const balance = balances[member.id] || { paid: 0, getsBack: 0, owes: [] };
-                      return (
-                        <div key={member.id} className="mb-4 border-b pb-2">
-                          <h3 className="font-medium">{member.name}</h3>
-                          <p>Paid: ₹{balance.paid.toFixed(2)}</p>
-                          {balance.getsBack > 0 && <p>Gets Back: ₹{balance.getsBack.toFixed(2)}</p>}
-                          {balance.owes.length > 0 && (
-                            <ul className="ml-4 mt-2 space-y-1">
-                              {balance.owes.map((o, i) => {
-                                const toMember = members.find(m => m.id === o.to);
-                                return (
-                                  <li key={i} className="flex justify-between">
-                                    <span>Owes {toMember?.name || 'Unknown'} for {o.description}</span>
-                                    <span>₹{o.amount.toFixed(2)}</span>
-                                  </li>
-                                )
-                              })}
-                            </ul>
-                          )}
-                        </div>
-                      )
-                    })
-                    }
-                  </div>
-                </div>
-                
-                <div className="mb-4">
-                  <label htmlFor="paidBy" className="block text-gray-700 mb-2">
-                    Paid By
-                  </label>
-                  <select
-                    id="paidBy"
-                    value={settlementData.paid_by}
-                    onChange={(e) => setSettlementData({...settlementData, paid_by: e.target.value})}
-                    className="form-input"
-                    required
-                  >
-                    <option value="">Select a member</option>
-                    {members.map((member) => (
-                      <option key={member.id} value={member.id}>{member.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mb-4">
-                  <label htmlFor="paidTo" className="block text-gray-700 mb-2">
-                    Paid To
-                  </label>
-                  <select
-                    id="paidTo"
-                    value={settlementData.paid_to}
-                    onChange={(e) => setSettlementData({...settlementData, paid_to: e.target.value})}
-                    className="form-input"
-                    required
-                  >
-                    <option value="">Select a member</option>
-                    {members.map((member) => (
-                      <option key={member.id} value={member.id}>{member.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mb-4">
-                  <label htmlFor="amount" className="block text-gray-700 mb-2">
-                    Amount (₹)
-                  </label>
-                  <input
-                    type="number"
-                    id="amount"
-                    value={settlementData.amount}
-                    onChange={(e) => setSettlementData({...settlementData, amount: e.target.value})}
-                    className="form-input"
-                    placeholder="0.00"
-                    min="0.01"
-                    step="0.01"
-                    required
-                  />
-                </div>
-              <div className="flex justify-end space-x-2">
+            </div>
+
+            <form onSubmit={settleUp}>
+              <div className="mb-4">
+                <label htmlFor="settlePaidBy" className="block text-gray-700 mb-2">
+                  Who Paid? *
+                </label>
+                <select
+                  id="settlePaidBy"
+                  value={settlementData.paid_by}
+                  onChange={(e) => setSettlementData({...settlementData, paid_by: e.target.value})}
+                  className="form-input w-full"
+                  required
+                >
+                  <option value="">Select a member</option>
+                  {members.map((member) => (
+                    <option key={member.id} value={member.id}>{member.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="mb-4">
+                <label htmlFor="settlePaidTo" className="block text-gray-700 mb-2">
+                  Paid To? *
+                </label>
+                <select
+                  id="settlePaidTo"
+                  value={settlementData.paid_to}
+                  onChange={(e) => setSettlementData({...settlementData, paid_to: e.target.value})}
+                  className="form-input w-full"
+                  required
+                >
+                  <option value="">Select a member</option>
+                  {members.map((member) => (
+                    <option key={member.id} value={member.id}>{member.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="mb-4">
+                <label htmlFor="settleAmount" className="block text-gray-700 mb-2">
+                  Amount (₹) *
+                </label>
+                <input
+                  type="number"
+                  id="settleAmount"
+                  value={settlementData.amount}
+                  onChange={(e) => setSettlementData({...settlementData, amount: e.target.value})}
+                  className="form-input w-full"
+                  placeholder="0.00"
+                  min="0.01"
+                  step="0.01"
+                  required
+                />
+                {settlementData.paid_by && settlementData.paid_to && settlementData.amount && (
+                  <p className="text-xs text-gray-600 mt-2">
+                    {members.find(m => m.id === parseInt(settlementData.paid_by))?.name} paid ₹
+                    {parseFloat(settlementData.amount).toFixed(2)} to {members.find(m => m.id === parseInt(settlementData.paid_to))?.name}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex justify-end space-x-2 mt-6">
                 <button
                   type="button"
-                  onClick={() => setShowSettleModal(false)}
+                  onClick={() => {
+                    setShowSettleModal(false);
+                    setSettlementData({
+                      paid_by: '',
+                      paid_to: '',
+                      amount: ''
+                    });
+                  }}
                   className="btn btn-secondary"
                 >
                   Cancel
@@ -515,49 +708,13 @@ function GroupDetailPage() {
                   type="submit"
                   className="btn btn-primary"
                 >
-                  Settle
+                  Record Settlement
                 </button>
               </div>
             </form>
-            )}
           </div>
         </div>
       )}
-
-      {ocrItems.length > 0 && (
-  <div className="mb-4">
-    <h3 className="font-semibold mb-2">Preview Extracted Items</h3>
-    <div className="border p-2 rounded max-h-40 overflow-y-auto">
-      {ocrItems.map((item, index) => (
-        <div key={index} className="flex justify-between mb-1">
-          <input
-            type="text"
-            value={item.description}
-            onChange={(e) => {
-              const updatedItems = [...ocrItems];
-              updatedItems[index].description = e.target.value;
-              setOcrItems(updatedItems);
-            }}
-            className="form-input w-2/3"
-          />
-          <input
-            type="number"
-            value={item.amount}
-            min="0.01"
-            step="0.01"
-            onChange={(e) => {
-              const updatedItems = [...ocrItems];
-              updatedItems[index].amount = parseFloat(e.target.value);
-              setOcrItems(updatedItems);
-              setExpenseData({...expenseData, amount: updatedItems.reduce((sum, i) => sum + i.amount, 0)});
-            }}
-            className="form-input w-1/3 ml-2"
-          />
-        </div>
-      ))}
-    </div>
-  </div>
-)}
 
     </div>
   );
