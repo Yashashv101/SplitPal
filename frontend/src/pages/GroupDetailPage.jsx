@@ -21,6 +21,15 @@ function GroupDetailPage() {
     paid_by: '',
     participants: []
   });
+  const [splitAmounts, setSplitAmounts] = useState({});
+  const [loading, setLoading] = useState({
+    group: false,
+    balances: false,
+    addingMember: false,
+    addingExpense: false,
+    settling: false
+  });
+  const [errors, setErrors] = useState({});
   const [settlementData, setSettlementData] = useState({
     paid_by: '',
     paid_to: '',
@@ -32,31 +41,76 @@ function GroupDetailPage() {
     fetchBalances();
   }, [groupId]);
 
+  // Auto-split calculation useEffect
+  useEffect(() => {
+    if (expenseData.amount && expenseData.participants.length > 0) {
+      const amount = parseFloat(expenseData.amount);
+      const participantCount = expenseData.participants.length;
+      const splitAmount = amount / participantCount;
+      
+      const newSplitAmounts = {};
+      expenseData.participants.forEach(participantId => {
+        newSplitAmounts[participantId] = splitAmount.toFixed(2);
+      });
+      setSplitAmounts(newSplitAmounts);
+    } else {
+      setSplitAmounts({});
+    }
+  }, [expenseData.amount, expenseData.participants]);
+
   const fetchGroupDetails = async () => {
+    setLoading(prev => ({ ...prev, group: true }));
     try {
       const response = await axios.get(`${API_URL}/groups/${groupId}`);
+      
+      // Data verification
+      if (!response.data || typeof response.data !== 'object') {
+        throw new Error('Invalid group data received');
+      }
+      
       setGroup(response.data);
-      setMembers(response.data.members || []);
-      setExpenses(response.data.expenses || []);
+      setMembers(Array.isArray(response.data.members) ? response.data.members : []);
+      setExpenses(Array.isArray(response.data.expenses) ? response.data.expenses : []);
     } catch (error) {
       console.error('Error fetching group details:', error);
+      setErrors(prev => ({ ...prev, group: 'Failed to load group details' }));
+    } finally {
+      setLoading(prev => ({ ...prev, group: false }));
     }
   };
 
   const fetchBalances = async () => {
-  try {
-    const response = await axios.get(`${API_URL}/groups/${groupId}/balances`);
-    setBalances(response.data.memberBalances);
-    setMembers(response.data.members);
-  } catch (error) {
-    console.error('Error fetching balances:', error);
-  }
-};
+    setLoading(prev => ({ ...prev, balances: true }));
+    try {
+      const response = await axios.get(`${API_URL}/groups/${groupId}/balances`);
+      
+      // Data verification
+      if (!response.data || typeof response.data !== 'object') {
+        throw new Error('Invalid balance data received');
+      }
+      
+      setBalances(Array.isArray(response.data.memberBalances) ? response.data.memberBalances : []);
+      if (response.data.members && Array.isArray(response.data.members)) {
+        setMembers(response.data.members);
+      }
+    } catch (error) {
+      console.error('Error fetching balances:', error);
+      setErrors(prev => ({ ...prev, balances: 'Failed to load balances' }));
+    } finally {
+      setLoading(prev => ({ ...prev, balances: false }));
+    }
+  };
 
 
   const addMember = async (e) => {
     e.preventDefault();
-    if (!newMemberName.trim()) return;
+    if (!newMemberName.trim()) {
+      setErrors(prev => ({ ...prev, member: 'Member name is required' }));
+      return;
+    }
+    
+    setLoading(prev => ({ ...prev, addingMember: true }));
+    setErrors(prev => ({ ...prev, member: '' }));
 
     try {
       await axios.post(`${API_URL}/groups/${groupId}/members`, { name: newMemberName });
@@ -65,27 +119,34 @@ function GroupDetailPage() {
       fetchGroupDetails();
     } catch (error) {
       console.error('Error adding member:', error);
+      setErrors(prev => ({ ...prev, member: 'Failed to add member' }));
+    } finally {
+      setLoading(prev => ({ ...prev, addingMember: false }));
     }
   };
 
   const addExpense = async (e) => {
   e.preventDefault();
+  
+  setErrors(prev => ({ ...prev, expense: '' }));
 
   // Validation
   if (!expenseData.description.trim()) {
-    alert('Please enter a description');
+    setErrors(prev => ({ ...prev, expense: 'Please enter a description' }));
     return;
   }
 
   if (!expenseData.amount || parseFloat(expenseData.amount) <= 0) {
-    alert('Please enter a valid amount');
+    setErrors(prev => ({ ...prev, expense: 'Please enter a valid amount' }));
     return;
   }
 
   if (!expenseData.paid_by) {
-    alert('Please select who paid for this expense');
+    setErrors(prev => ({ ...prev, expense: 'Please select who paid for this expense' }));
     return;
   }
+
+  setLoading(prev => ({ ...prev, addingExpense: true }));
 
   try {
     let finalDescription = expenseData.description;
@@ -129,8 +190,6 @@ function GroupDetailPage() {
     await fetchGroupDetails();
     await fetchBalances();
 
-    alert('Expense added successfully!');
-
   } catch (error) {
     console.error('Error adding expense:', error);
     console.error('Error response:', error.response?.data);
@@ -140,7 +199,9 @@ function GroupDetailPage() {
       || error.message 
       || 'Unknown error occurred';
     
-    alert('Failed to add expense: ' + errorMessage);
+    setErrors(prev => ({ ...prev, expense: 'Failed to add expense: ' + errorMessage }));
+  } finally {
+    setLoading(prev => ({ ...prev, addingExpense: false }));
   }
 };
 
@@ -148,26 +209,30 @@ function GroupDetailPage() {
   const settleUp = async (e) => {
   e.preventDefault();
   
+  setErrors(prev => ({ ...prev, settlement: '' }));
+  
   // Validation
   if (!settlementData.paid_by) {
-    alert('Please select who paid');
+    setErrors(prev => ({ ...prev, settlement: 'Please select who paid' }));
     return;
   }
 
   if (!settlementData.paid_to) {
-    alert('Please select who received the payment');
+    setErrors(prev => ({ ...prev, settlement: 'Please select who received the payment' }));
     return;
   }
 
   if (!settlementData.amount || parseFloat(settlementData.amount) <= 0) {
-    alert('Please enter a valid amount');
+    setErrors(prev => ({ ...prev, settlement: 'Please enter a valid amount' }));
     return;
   }
 
   if (settlementData.paid_by === settlementData.paid_to) {
-    alert('Cannot settle with yourself');
+    setErrors(prev => ({ ...prev, settlement: 'Cannot settle with yourself' }));
     return;
   }
+
+  setLoading(prev => ({ ...prev, settling: true }));
 
   try {
     console.log('Submitting settlement:', settlementData);
@@ -192,7 +257,6 @@ function GroupDetailPage() {
     await fetchBalances();
     await fetchGroupDetails();
 
-    alert('Settlement recorded successfully!');
   } catch (error) {
     console.error('Error settling up:', error);
     console.error('Error response:', error.response?.data);
@@ -202,7 +266,9 @@ function GroupDetailPage() {
       || error.message 
       || 'Unknown error occurred';
     
-    alert('Failed to record settlement: ' + errorMessage);
+    setErrors(prev => ({ ...prev, settlement: 'Failed to record settlement: ' + errorMessage }));
+  } finally {
+    setLoading(prev => ({ ...prev, settling: false }));
   }
 };
 
@@ -265,8 +331,30 @@ function GroupDetailPage() {
     });
   };
 
-  if (!group) {
-    return <div className="text-center py-10">Loading...</div>;
+  if (loading.group || !group) {
+    return (
+      <div className="flex justify-center items-center py-20">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <span className="ml-3 text-lg">Loading group details...</span>
+      </div>
+    );
+  }
+
+  if (errors.group) {
+    return (
+      <div className="text-center py-20">
+        <div className="text-red-500 text-lg mb-4">{errors.group}</div>
+        <button 
+          onClick={() => {
+            setErrors(prev => ({ ...prev, group: '' }));
+            fetchGroupDetails();
+          }}
+          className="btn btn-primary"
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -342,30 +430,70 @@ function GroupDetailPage() {
 
         {/* Balances Section */}
         <div className="card">
-          <h2 className="text-xl font-semibold mb-4">Balances</h2>
-          {members.map(member => {
-            const balance = balances[member.id] || { paid: 0, getsBack: 0, owes: [] };
-            return (
-              <div key={member.id} className="mb-4 border-b pb-2">
-                <h3 className="font-medium">{member.name}</h3>
-                <p>Paid: ₹{balance.paid.toFixed(2)}</p>
-                {balance.getsBack > 0 && <p>Gets Back: ₹{balance.getsBack.toFixed(2)}</p>}
-                {balance.owes.length > 0 && (
-                  <ul className="ml-4 mt-2 space-y-1">
-                    {balance.owes.map((o, i) => {
-                      const toMember = members.find(m => m.id === o.to);
-                      return (
-                        <li key={i} className="flex justify-between">
-                          <span>Owes {toMember?.name || 'Unknown'} for {o.description}</span>
-                          <span>₹{o.amount.toFixed(2)}</span>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </div>
-            )
-          })}
+          <h2 className="text-xl font-semibold mb-4">Balance Summary</h2>
+          {loading.balances ? (
+            <div className="flex justify-center items-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              <span className="ml-2">Loading balances...</span>
+            </div>
+          ) : errors.balances ? (
+            <div className="text-red-500 text-center py-4">{errors.balances}</div>
+          ) : (
+            <div className="space-y-4">
+              {members.map(member => {
+                const balance = balances[member.id] || { paid: 0, getsBack: 0, owes: [] };
+                const netBalance = balance.getsBack - balance.owes.reduce((sum, owe) => sum + owe.amount, 0);
+                
+                return (
+                  <div key={member.id} className="border rounded-lg p-4 bg-gray-50">
+                    <div className="flex justify-between items-center mb-3">
+                      <h3 className="font-semibold text-lg">{member.name}</h3>
+                      <div className={`px-3 py-1 rounded-full text-sm font-medium ${
+                        netBalance > 0 
+                          ? 'bg-green-100 text-green-800' 
+                          : netBalance < 0 
+                          ? 'bg-red-100 text-red-800' 
+                          : 'bg-gray-100 text-gray-800'
+                      }`}>
+                        Net: {netBalance > 0 ? '+' : ''}₹{netBalance.toFixed(2)}
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4 mb-3">
+                      <div className="text-center">
+                        <div className="text-sm text-gray-600">Total Paid</div>
+                        <div className="text-lg font-medium text-blue-600">₹{balance.paid.toFixed(2)}</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-sm text-gray-600">Gets Back</div>
+                        <div className="text-lg font-medium text-green-600">₹{balance.getsBack.toFixed(2)}</div>
+                      </div>
+                    </div>
+                    
+                    {balance.owes.length > 0 && (
+                      <div>
+                        <div className="text-sm text-gray-600 mb-2">Owes:</div>
+                        <ul className="space-y-1">
+                          {balance.owes.map((o, i) => {
+                            const toMember = members.find(m => m.id === o.to);
+                            return (
+                              <li key={i} className="flex justify-between items-center bg-white rounded px-3 py-2">
+                                <span className="text-sm">
+                                  <span className="font-medium">{toMember?.name || 'Unknown'}</span>
+                                  <span className="text-gray-500 ml-1">for {o.description}</span>
+                                </span>
+                                <span className="font-medium text-red-600">₹{o.amount.toFixed(2)}</span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
 
 
@@ -376,6 +504,11 @@ function GroupDetailPage() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg p-6 w-full max-w-md">
             <h2 className="text-xl font-bold mb-4">Add Member</h2>
+            {errors.member && (
+              <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                {errors.member}
+              </div>
+            )}
             <form onSubmit={addMember}>
               <div className="mb-4">
                 <label htmlFor="memberName" className="block text-gray-700 mb-2">
@@ -394,16 +527,28 @@ function GroupDetailPage() {
               <div className="flex justify-end space-x-2">
                 <button
                   type="button"
-                  onClick={() => setShowAddMemberModal(false)}
+                  onClick={() => {
+                    setShowAddMemberModal(false);
+                    setErrors(prev => ({ ...prev, member: '' }));
+                  }}
                   className="btn btn-secondary"
+                  disabled={loading.addingMember}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   className="btn btn-primary"
+                  disabled={loading.addingMember}
                 >
-                  Add
+                  {loading.addingMember ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Adding...
+                    </>
+                  ) : (
+                    'Add'
+                  )}
                 </button>
               </div>
             </form>
@@ -415,6 +560,11 @@ function GroupDetailPage() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">Add Expense</h2>
+            {errors.expense && (
+              <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                {errors.expense}
+              </div>
+            )}
             <form onSubmit={addExpense}>
               
               {/* Bill Upload Section */}
@@ -564,11 +714,24 @@ function GroupDetailPage() {
                     </div>
                   ))}
                 </div>
-                {expenseData.participants.length > 0 && (
-                  <p className="text-xs text-gray-500 mt-1">
-                    Split between {expenseData.participants.length} member(s): 
-                    ₹{(parseFloat(expenseData.amount || 0) / expenseData.participants.length).toFixed(2)} each
-                  </p>
+                {expenseData.participants.length > 0 && expenseData.amount && (
+                  <div className="mt-2 p-2 bg-blue-50 rounded border">
+                    <p className="text-xs text-blue-600 font-medium mb-1">
+                      Split between {expenseData.participants.length} member(s):
+                    </p>
+                    <div className="space-y-1">
+                      {expenseData.participants.map(participantId => {
+                        const member = members.find(m => m.id === participantId);
+                        const splitAmount = splitAmounts[participantId] || '0.00';
+                        return (
+                          <div key={participantId} className="flex justify-between text-xs">
+                            <span>{member?.name || 'Unknown'}</span>
+                            <span className="font-medium">₹{splitAmount}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -585,16 +748,26 @@ function GroupDetailPage() {
                       paid_by: '',
                       participants: []
                     });
+                    setErrors(prev => ({ ...prev, expense: '' }));
                   }}
                   className="btn btn-secondary"
+                  disabled={loading.addingExpense}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   className="btn btn-primary"
+                  disabled={loading.addingExpense}
                 >
-                  Add Expense
+                  {loading.addingExpense ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Adding...
+                    </>
+                  ) : (
+                    'Add Expense'
+                  )}
                 </button>
               </div>
             </form>
@@ -606,6 +779,11 @@ function GroupDetailPage() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">Settle Up</h2>
+            {errors.settlement && (
+              <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                {errors.settlement}
+              </div>
+            )}
             
             {/* Show current balances for reference */}
             <div className="mb-4 bg-gray-50 p-3 rounded border">
@@ -699,16 +877,26 @@ function GroupDetailPage() {
                       paid_to: '',
                       amount: ''
                     });
+                    setErrors(prev => ({ ...prev, settlement: '' }));
                   }}
                   className="btn btn-secondary"
+                  disabled={loading.settling}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   className="btn btn-primary"
+                  disabled={loading.settling}
                 >
-                  Record Settlement
+                  {loading.settling ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Recording...
+                    </>
+                  ) : (
+                    'Record Settlement'
+                  )}
                 </button>
               </div>
             </form>
