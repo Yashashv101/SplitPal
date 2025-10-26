@@ -9,7 +9,7 @@ function GroupDetailPage() {
   const [group, setGroup] = useState(null);
   const [members, setMembers] = useState([]);
   const [expenses, setExpenses] = useState([]);
-  const [balances, setBalances] = useState([]);
+  const [balances, setBalances] = useState({});
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
   const [showAddExpenseModal, setShowAddExpenseModal] = useState(false);
   const [showSettleModal, setShowSettleModal] = useState(false);
@@ -89,7 +89,7 @@ function GroupDetailPage() {
         throw new Error('Invalid balance data received');
       }
       
-      setBalances(Array.isArray(response.data.memberBalances) ? response.data.memberBalances : []);
+      setBalances(response.data.memberBalances || {});
       if (response.data.members && Array.isArray(response.data.members)) {
         setMembers(response.data.members);
       }
