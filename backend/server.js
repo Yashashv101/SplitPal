@@ -5,6 +5,7 @@ const mysql = require('mysql2/promise');
 const multer = require('multer');
 const path = require('path');
 const Tesseract = require('tesseract.js');
+  const currencyService = require('./services/currencyService');
 
 
 const app = express();
@@ -469,7 +470,509 @@ app.post('/api/ocr/bill', upload.single('bill'), async (req, res) => {
   }
 });
 
+// Currency API Endpoints
 
+// Get supported currencies
+// Get supported currencies
+app.get('/api/currencies/supported', async (req, res) => {
+  try {
+    if (dbConnected) {
+      // Fetch from database
+      const [rows] = await pool.execute(
+        'SELECT code, name, symbol, decimal_places FROM supported_currencies WHERE is_active = TRUE ORDER BY code'
+      );
+      res.json({
+        success: true,
+        currencies: rows
+      });
+    } else {
+      // Fallback to hardcoded currencies
+      const currencies = [
+        { code: 'INR', name: 'Indian Rupee', symbol: '₹', decimal_places: 2 },
+        { code: 'USD', name: 'US Dollar', symbol: '$', decimal_places: 2 },
+        { code: 'EUR', name: 'Euro', symbol: '€', decimal_places: 2 },
+        { code: 'GBP', name: 'British Pound', symbol: '£', decimal_places: 2 },
+        { code: 'JPY', name: 'Japanese Yen', symbol: '¥', decimal_places: 0 },
+        { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', decimal_places: 2 },
+        { code: 'AUD', name: 'Australian Dollar', symbol: 'A$', decimal_places: 2 },
+        { code: 'CHF', name: 'Swiss Franc', symbol: 'CHF', decimal_places: 2 },
+        { code: 'CNY', name: 'Chinese Yuan', symbol: '¥', decimal_places: 2 },
+        { code: 'SGD', name: 'Singapore Dollar', symbol: 'S$', decimal_places: 2 }
+      ];
+      res.json({
+        success: true,
+        currencies
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching supported currencies:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch supported currencies'
+    });
+  }
+});
+
+// Get current exchange rates
+app.get('/api/currencies/rates', async (req, res) => {
+  try {
+    if (dbConnected) {
+      // Try to fetch from database first
+      const [rows] = await pool.execute(
+        'SELECT from_currency, to_currency, rate, last_updated FROM currency_rates WHERE last_updated > DATE_SUB(NOW(), INTERVAL 1 HOUR)'
+      );
+      
+      if (rows.length > 0) {
+        const rates = {};
+        rows.forEach(row => {
+          if (!rates[row.from_currency]) {
+            rates[row.from_currency] = {};
+          }
+          rates[row.from_currency][row.to_currency] = row.rate;
+        });
+        
+        return res.json({
+          success: true,
+          rates,
+          lastUpdated: rows[0].last_updated
+        });
+      }
+    }
+    
+    // Fallback to external API or mock data
+    const mockRates = {
+      'USD': {
+        'INR': 83.25,
+        'EUR': 0.85,
+        'GBP': 0.73,
+        'JPY': 110.50,
+        'CAD': 1.25,
+        'AUD': 1.35,
+        'CHF': 0.92,
+        'CNY': 6.45,
+        'SGD': 1.35
+      },
+      'INR': {
+        'USD': 0.012,
+        'EUR': 0.010,
+        'GBP': 0.0088,
+        'JPY': 1.33,
+        'CAD': 0.015,
+        'AUD': 0.016,
+        'CHF': 0.011,
+        'CNY': 0.077,
+        'SGD': 0.016
+      }
+    };
+    
+    res.json({
+      success: true,
+      rates: mockRates,
+      lastUpdated: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error fetching exchange rates:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch exchange rates'
+    });
+  }
+});
+
+app.get('/api/currencies', async (req, res) => {
+  try {
+    const currencies = currencyService.getSupportedCurrencies();
+    res.json({
+      success: true,
+      currencies
+    });
+  } catch (error) {
+    console.error('Error fetching currencies:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch supported currencies'
+    });
+  }
+});
+
+// Get exchange rates for a base currency
+app.get('/api/currencies/:baseCurrency/rates', async (req, res) => {
+  try {
+    const { baseCurrency } = req.params;
+    const ratesData = await currencyService.getAllRatesFor(baseCurrency.toUpperCase());
+    
+    res.json({
+      success: true,
+      data: ratesData
+    });
+  } catch (error) {
+    console.error('Error fetching exchange rates:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch exchange rates'
+    });
+  }
+});
+
+// Convert amount between currencies
+app.post('/api/currencies/convert', async (req, res) => {
+  try {
+    const { amount, fromCurrency, toCurrency } = req.body;
+    
+    if (!amount || !fromCurrency || !toCurrency) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount, fromCurrency, and toCurrency are required'
+      });
+    }
+
+    const conversion = await currencyService.convertAmountWithLiveRate(
+      parseFloat(amount),
+      fromCurrency.toUpperCase(),
+      toCurrency.toUpperCase()
+    );
+
+    res.json({
+      success: true,
+      data: conversion
+    });
+  } catch (error) {
+    console.error('Error converting currency:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to convert currency'
+    });
+  }
+});
+
+// Batch convert multiple amounts
+app.post('/api/currencies/batch-convert', async (req, res) => {
+  try {
+    const { conversions } = req.body;
+    
+    if (!Array.isArray(conversions)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Conversions must be an array'
+      });
+    }
+
+    const results = await currencyService.batchConvert(conversions);
+
+    res.json({
+      success: true,
+      data: results
+    });
+  } catch (error) {
+    console.error('Error in batch conversion:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to perform batch conversion'
+    });
+  }
+});
+
+// Calculate total in target currency from mixed currency amounts
+app.post('/api/currencies/calculate-total', async (req, res) => {
+  try {
+    const { amounts, targetCurrency } = req.body;
+    
+    if (!Array.isArray(amounts) || !targetCurrency) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amounts array and targetCurrency are required'
+      });
+    }
+
+    const result = await currencyService.calculateTotal(amounts, targetCurrency.toUpperCase());
+
+    res.json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error('Error calculating total:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to calculate total'
+    });
+  }
+});
+
+// Update group default currency
+app.put('/api/groups/:id/currency', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { currency } = req.body;
+
+    if (!currency) {
+      return res.status(400).json({
+        success: false,
+        message: 'Currency is required'
+      });
+    }
+
+    const supportedCurrencies = currencyService.getSupportedCurrencies();
+    if (!supportedCurrencies[currency.toUpperCase()]) {
+      return res.status(400).json({
+        success: false,
+        message: 'Unsupported currency'
+      });
+    }
+
+    if (dbConnected) {
+      const [result] = await pool.execute(
+        'UPDATE `groups` SET default_currency = ?, currency_updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [currency.toUpperCase(), id]
+      );
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'Group currency updated successfully'
+      });
+    } else {
+      res.json({
+        success: true,
+        message: 'Group currency updated (mock mode)'
+      });
+    }
+  } catch (error) {
+    console.error('Error updating group currency:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update group currency'
+    });
+  }
+});
+
+// Payment Gateway Integration Endpoints
+
+// Create Razorpay order for settlement
+app.post('/api/payments/create-order', async (req, res) => {
+  try {
+    const { amount, currency, settlementId, groupId, payerId, receiverId } = req.body;
+
+    if (!amount || !currency || !settlementId || !groupId || !payerId || !receiverId) {
+      return res.status(400).json({
+        success: false,
+        message: 'All payment details are required'
+      });
+    }
+
+    // For now, create a mock order - will be replaced with actual Razorpay integration
+    const orderId = `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    let actualSettlementId = null;
+    
+    if (dbConnected) {
+      try {
+        console.log('Attempting to create settlement with values:', {
+          payerId, receiverId, amount, groupId
+        });
+        
+        // First, create an actual settlement record in the database
+        const [settlementResult] = await pool.execute(
+          'INSERT INTO settlements (payer_id, receiver_id, amount, group_id, date) VALUES (?, ?, ?, ?, CURDATE())',
+          [payerId, receiverId, amount, groupId]
+        );
+        
+        actualSettlementId = settlementResult.insertId;
+        console.log('Created settlement with ID:', actualSettlementId);
+        if (!actualSettlementId || isNaN(actualSettlementId)) {
+          console.error('Invalid settlementId:', actualSettlementId);
+          return res.status(500).json({
+            success: false,
+            message: 'Invalid settlement ID while creating payment transaction'
+          });
+        }
+        
+       console.log('Attempting to create payment transaction with values:', {
+          settlement_id: actualSettlementId,
+          group_id: groupId,
+          payer_id: payerId,
+          receiver_id: receiverId,
+          amount,
+          currency,
+          orderId
+        });
+        
+        // Now create payment transaction record with the actual settlement ID
+        await pool.execute(
+          `INSERT INTO payment_transactions 
+           (settlement_id, group_id, payer_id, receiver_id, amount, currency, payment_method, transaction_id, payment_status, description) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [actualSettlementId, groupId, payerId, receiverId, amount, currency, 'razorpay', orderId, 'pending', `Settlement payment via Razorpay (frontend ref: ${settlementId})`]
+        );
+        console.log('Created payment transaction for settlement ID:', actualSettlementId);
+      } catch (dbError) {
+        console.error('Database error during payment order creation:', dbError);
+        console.error('Error details:', {
+          code: dbError.code,
+          errno: dbError.errno,
+          sqlMessage: dbError.sqlMessage,
+          sql: dbError.sql
+        });
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create payment order'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        orderId,
+        amount,
+        currency,
+        settlementId: actualSettlementId || settlementId,
+        status: 'created'
+      }
+    });
+  } catch (error) {
+    console.error('Error creating payment order:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create payment order'
+    });
+  }
+});
+
+// Verify payment and update settlement
+app.post('/api/payments/verify', async (req, res) => {
+  try {
+    const { orderId, paymentId, signature, settlementId } = req.body;
+
+    if (!orderId || !paymentId || !settlementId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification details are required'
+      });
+    }
+
+    // For now, mock verification - will be replaced with actual Razorpay verification
+    const isValid = true; // Mock verification result
+     const settlementNumericId = parseInt(settlementId, 10);
+
+    if (dbConnected && isValid) {
+      // Start transaction for ACID compliance
+      const connection = await pool.getConnection();
+      await connection.beginTransaction();
+
+      try {
+        // Update payment transaction status
+        await connection.execute(
+          `UPDATE payment_transactions 
+           SET payment_status = ?, gateway_transaction_id = ?, updated_at = CURRENT_TIMESTAMP 
+           WHERE transaction_id = ?`,
+          ['completed', paymentId, orderId]
+        );
+
+        // Update settlement status
+        await connection.execute(
+          `UPDATE settlements 
+           SET payment_status = ?, transaction_id = ?, payment_method = 'razorpay' 
+           WHERE id = ?`,
+          ['completed', paymentId, settlementNumericId]
+        );
+
+        await connection.commit();
+        connection.release();
+
+        res.json({
+          success: true,
+          message: 'Payment verified and settlement updated successfully'
+        });
+      } catch (error) {
+        await connection.rollback();
+        connection.release();
+        throw error;
+      }
+    } else {
+      res.json({
+        success: isValid,
+        message: isValid ? 'Payment verified (mock mode)' : 'Payment verification failed'
+      });
+    }
+  } catch (error) {
+    console.error('Error verifying payment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to verify payment'
+    });
+  }
+});
+
+// Get transaction history for a group
+app.get('/api/groups/:id/transactions', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    if (dbConnected) {
+      const [transactions] = await pool.execute(
+        `SELECT pt.*, 
+                m1.name as payer_name, 
+                m2.name as receiver_name,
+                s.date as settlement_date
+         FROM payment_transactions pt
+         LEFT JOIN members m1 ON pt.payer_id = m1.id
+         LEFT JOIN members m2 ON pt.receiver_id = m2.id
+         LEFT JOIN settlements s ON pt.settlement_id = s.id
+         WHERE pt.group_id = ?
+         ORDER BY pt.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [id, parseInt(limit), parseInt(offset)]
+      );
+
+      const [countResult] = await pool.execute(
+        'SELECT COUNT(*) as total FROM payment_transactions WHERE group_id = ?',
+        [id]
+      );
+
+      res.json({
+        success: true,
+        data: {
+          transactions,
+          pagination: {
+            page: parseInt(page),
+            limit: parseInt(limit),
+            total: countResult[0].total,
+            totalPages: Math.ceil(countResult[0].total / limit)
+          }
+        }
+      });
+    } else {
+      // Mock transaction data
+      res.json({
+        success: true,
+        data: {
+          transactions: [],
+          pagination: {
+            page: 1,
+            limit: 20,
+            total: 0,
+            totalPages: 0
+          }
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching transactions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch transaction history'
+    });
+  }
+});
 
 // Start server
 app.listen(PORT, () => {

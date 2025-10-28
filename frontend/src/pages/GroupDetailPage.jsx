@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import axios from 'axios';
+import CurrencySelector from '../components/CurrencySelector';
+import CurrencyConverter from '../components/CurrencyConverter';
+import PayNowButton from '../components/PayNowButton';
+import TransactionHistory from '../components/TransactionHistory';
 
 const API_URL = 'http://localhost:5001/api';
 
@@ -19,7 +23,8 @@ function GroupDetailPage() {
     description: '',
     amount: '',
     paid_by: '',
-    participants: []
+    participants: [],
+    currency: 'INR'
   });
   const [splitAmounts, setSplitAmounts] = useState({});
   const [loading, setLoading] = useState({
@@ -35,10 +40,17 @@ function GroupDetailPage() {
     paid_to: '',
     amount: ''
   });
+  const [currencies, setCurrencies] = useState([]);
+  const [exchangeRates, setExchangeRates] = useState({});
+  const [selectedCurrency, setSelectedCurrency] = useState('INR');
+  const [showCurrencyConverter, setShowCurrencyConverter] = useState(false);
+  const [showTransactionHistory, setShowTransactionHistory] = useState(false);
 
   useEffect(() => {
     fetchGroupDetails();
     fetchBalances();
+    fetchCurrencies();
+    fetchExchangeRates();
   }, [groupId]);
 
   // Auto-split calculation useEffect
@@ -99,6 +111,95 @@ function GroupDetailPage() {
     } finally {
       setLoading(prev => ({ ...prev, balances: false }));
     }
+  };
+
+  const fetchCurrencies = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/currencies/supported`);
+      if (response.data.success) {
+        setCurrencies(response.data.data);
+      }
+    } catch (error) {
+      console.error('Error fetching currencies:', error);
+    }
+  };
+
+  const fetchExchangeRates = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/currencies/rates`);
+      if (response.data.success) {
+        // The API returns rates nested under 'rates' property
+        setExchangeRates(response.data.rates || {});
+      }
+    } catch (error) {
+      console.error('Error fetching exchange rates:', error);
+      // Set fallback rates to prevent crashes
+      setExchangeRates({
+        'USD': { 'INR': 83.25, 'EUR': 0.85, 'GBP': 0.73 },
+        'INR': { 'USD': 0.012, 'EUR': 0.010, 'GBP': 0.0088 }
+      });
+    }
+  };
+
+  // Format amount with currency symbol
+  const formatAmount = (amount, currency) => {
+    // Ensure amount is a valid number
+    const numericAmount = parseFloat(amount) || 0;
+    const convertedAmount = convertCurrency(numericAmount, 'INR', currency);
+    
+    // Ensure convertedAmount is a valid number
+    const finalAmount = parseFloat(convertedAmount) || 0;
+    
+    const symbols = {
+      'USD': '$',
+      'EUR': '€',
+      'GBP': '£',
+      'JPY': '¥',
+      'INR': '₹',
+      'AUD': 'A$',
+      'CAD': 'C$',
+      'CHF': 'CHF',
+      'CNY': '¥',
+      'SEK': 'kr'
+    };
+    return `${symbols[currency] || currency}${finalAmount.toFixed(2)}`;
+  };
+
+  // Convert currency using exchange rates
+  const convertCurrency = (amount, fromCurrency, toCurrency) => {
+    // Ensure amount is a valid number
+    const numericAmount = parseFloat(amount) || 0;
+    
+    if (fromCurrency === toCurrency) return numericAmount;
+    
+    // Add null checks for exchangeRates and nested properties
+    if (!exchangeRates || typeof exchangeRates !== 'object') return numericAmount;
+    if (!exchangeRates[fromCurrency] || !exchangeRates[fromCurrency][toCurrency]) {
+      // Try reverse conversion if direct conversion not available
+      if (exchangeRates[toCurrency] && exchangeRates[toCurrency][fromCurrency]) {
+        return numericAmount / exchangeRates[toCurrency][fromCurrency];
+      }
+      return numericAmount;
+    }
+    
+    // Direct conversion available
+    const convertedAmount = numericAmount * exchangeRates[fromCurrency][toCurrency];
+    
+    // Ensure result is a valid number
+    return parseFloat(convertedAmount) || numericAmount;
+  };
+
+  const handlePaymentSuccess = (paymentData) => {
+    console.log('Payment successful:', paymentData);
+    // Refresh balances after successful payment
+    fetchBalances();
+    // Show success message
+    setErrors(prev => ({ ...prev, payment: '' }));
+  };
+
+  const handlePaymentError = (error) => {
+    console.error('Payment failed:', error);
+    setErrors(prev => ({ ...prev, payment: error }));
   };
 
 
@@ -380,6 +481,15 @@ function GroupDetailPage() {
           >
             Settle Up
           </button>
+          <button 
+            onClick={() => setShowTransactionHistory(true)}
+            className="btn btn-outline"
+          >
+            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+            </svg>
+            History
+          </button>
         </div>
       </div>
 
@@ -416,7 +526,14 @@ function GroupDetailPage() {
                   <li key={expense.id} className="border-b pb-2">
                     <div className="flex justify-between">
                       <span className="font-medium">{expense.description}</span>
-                      <span className="text-green-600 font-medium">₹{expense.amount}</span>
+                      <span className="text-green-600 font-medium">
+                        {formatAmount(expense.amount, selectedCurrency)}
+                      </span>
+                      {selectedCurrency !== 'INR' && (
+                        <div className="text-xs text-gray-500">
+                          ₹{expense.amount}
+                        </div>
+                      )}
                     </div>
                     <div className="text-sm text-gray-500">
                       Paid by {paidBy ? paidBy.name : 'Unknown'} • {new Date(expense.date || expense.created_at).toLocaleDateString()}
@@ -430,7 +547,33 @@ function GroupDetailPage() {
 
         {/* Balances Section */}
         <div className="card">
-          <h2 className="text-xl font-semibold mb-4">Balance Summary</h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Balance Summary</h2>
+            <div className="flex items-center space-x-2">
+              <CurrencySelector
+                currencies={currencies}
+                selectedCurrency={selectedCurrency}
+                onCurrencyChange={setSelectedCurrency}
+                size="sm"
+              />
+              <button
+                onClick={() => setShowCurrencyConverter(!showCurrencyConverter)}
+                className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200 transition-colors"
+              >
+                {showCurrencyConverter ? 'Hide' : 'Show'} Converter
+              </button>
+            </div>
+          </div>
+          
+          {showCurrencyConverter && (
+            <div className="mb-4">
+              <CurrencyConverter
+                currencies={currencies}
+                exchangeRates={exchangeRates}
+                onRatesUpdate={setExchangeRates}
+              />
+            </div>
+          )}
           {loading.balances ? (
             <div className="flex justify-center items-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
@@ -455,34 +598,80 @@ function GroupDetailPage() {
                           ? 'bg-red-100 text-red-800' 
                           : 'bg-gray-100 text-gray-800'
                       }`}>
-                        Net: {netBalance > 0 ? '+' : ''}₹{netBalance.toFixed(2)}
+                        Net: {netBalance > 0 ? '+' : ''}{formatAmount(Math.abs(netBalance), selectedCurrency)}
+                        {selectedCurrency !== 'INR' && (
+                          <div className="text-xs text-gray-500">
+                            ₹{netBalance.toFixed(2)}
+                          </div>
+                        )}
                       </div>
                     </div>
                     
                     <div className="grid grid-cols-2 gap-4 mb-3">
                       <div className="text-center">
                         <div className="text-sm text-gray-600">Total Paid</div>
-                        <div className="text-lg font-medium text-blue-600">₹{balance.paid.toFixed(2)}</div>
+                        <div className="text-lg font-medium text-blue-600">
+                          {formatAmount(balance.paid, selectedCurrency)}
+                        </div>
+                        {selectedCurrency !== 'INR' && (
+                          <div className="text-xs text-gray-500">
+                            ₹{balance.paid.toFixed(2)}
+                          </div>
+                        )}
                       </div>
                       <div className="text-center">
                         <div className="text-sm text-gray-600">Gets Back</div>
-                        <div className="text-lg font-medium text-green-600">₹{balance.getsBack.toFixed(2)}</div>
+                        <div className="text-lg font-medium text-green-600">
+                          {formatAmount(balance.getsBack, selectedCurrency)}
+                        </div>
+                        {selectedCurrency !== 'INR' && (
+                          <div className="text-xs text-gray-500">
+                            ₹{balance.getsBack.toFixed(2)}
+                          </div>
+                        )}
                       </div>
                     </div>
                     
                     {balance.owes.length > 0 && (
                       <div>
                         <div className="text-sm text-gray-600 mb-2">Owes:</div>
-                        <ul className="space-y-1">
+                        <ul className="space-y-2">
                           {balance.owes.map((o, i) => {
                             const toMember = members.find(m => m.id === o.to);
+                            const settlement = {
+                              id: `${member.id}-${o.to}-${i}`,
+                              amount: o.amount,
+                              currency: selectedCurrency,
+                              payer_id: member.id,
+                              receiver_id: o.to,
+                              description: o.description
+                            };
+                            
                             return (
-                              <li key={i} className="flex justify-between items-center bg-white rounded px-3 py-2">
-                                <span className="text-sm">
-                                  <span className="font-medium">{toMember?.name || 'Unknown'}</span>
-                                  <span className="text-gray-500 ml-1">for {o.description}</span>
-                                </span>
-                                <span className="font-medium text-red-600">₹{o.amount.toFixed(2)}</span>
+                              <li key={i} className="bg-white rounded px-3 py-3 border">
+                                <div className="flex justify-between items-center mb-2">
+                                  <span className="text-sm">
+                                    <span className="font-medium">{toMember?.name || 'Unknown'}</span>
+                                    <span className="text-gray-500 ml-1">for {o.description}</span>
+                                  </span>
+                                  <span className="font-medium text-red-600">
+                                {formatAmount(o.amount, selectedCurrency)}
+                              </span>
+                              {selectedCurrency !== 'INR' && (
+                                <div className="text-xs text-gray-500">
+                                  ₹{o.amount.toFixed(2)}
+                                </div>
+                              )}
+                                </div>
+                                <div className="flex justify-end">
+                                  <PayNowButton
+                                    settlement={settlement}
+                                    groupId={groupId}
+                                    onPaymentSuccess={handlePaymentSuccess}
+                                    onPaymentError={handlePaymentError}
+                                    className="text-xs"
+                                  />
+                                </div>
                               </li>
                             )
                           })}
@@ -656,22 +845,32 @@ function GroupDetailPage() {
                 />
               </div>
 
-              {/* Amount Input */}
+              {/* Amount and Currency Input */}
               <div className="mb-4">
                 <label htmlFor="amount" className="block text-gray-700 mb-2">
-                  Amount (₹) *
+                  Amount *
                 </label>
-                <input
-                  type="number"
-                  id="amount"
-                  value={expenseData.amount}
-                  onChange={(e) => setExpenseData({...expenseData, amount: e.target.value})}
-                  className="form-input w-full"
-                  placeholder="0.00"
-                  min="0.01"
-                  step="0.01"
-                  required
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    id="amount"
+                    value={expenseData.amount}
+                    onChange={(e) => setExpenseData({...expenseData, amount: e.target.value})}
+                    className="form-input flex-1"
+                    placeholder="0.00"
+                    min="0.01"
+                    step="0.01"
+                    required
+                  />
+                  <div className="w-32">
+                    <CurrencySelector
+                      currencies={currencies}
+                      selectedCurrency={expenseData.currency || selectedCurrency}
+                      onCurrencyChange={(currency) => setExpenseData({...expenseData, currency})}
+                      size="md"
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* Paid By Selection */}
@@ -902,6 +1101,14 @@ function GroupDetailPage() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Transaction History Modal */}
+      {showTransactionHistory && (
+        <TransactionHistory
+          groupId={groupId}
+          onClose={() => setShowTransactionHistory(false)}
+        />
       )}
 
     </div>
