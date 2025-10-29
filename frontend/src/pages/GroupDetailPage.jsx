@@ -19,6 +19,7 @@ function GroupDetailPage() {
   const [showSettleModal, setShowSettleModal] = useState(false);
   const [newMemberName, setNewMemberName] = useState('');
   const [ocrItems, setOcrItems] = useState([]);
+  const [newMemberUpi, setNewMemberUpi] = useState('');
   const [expenseData, setExpenseData] = useState({
     description: '',
     amount: '',
@@ -70,48 +71,80 @@ function GroupDetailPage() {
     }
   }, [expenseData.amount, expenseData.participants]);
 
-  const fetchGroupDetails = async () => {
-    setLoading(prev => ({ ...prev, group: true }));
-    try {
-      const response = await axios.get(`${API_URL}/groups/${groupId}`);
-      
-      // Data verification
-      if (!response.data || typeof response.data !== 'object') {
-        throw new Error('Invalid group data received');
-      }
-      
-      setGroup(response.data);
-      setMembers(Array.isArray(response.data.members) ? response.data.members : []);
-      setExpenses(Array.isArray(response.data.expenses) ? response.data.expenses : []);
-    } catch (error) {
-      console.error('Error fetching group details:', error);
-      setErrors(prev => ({ ...prev, group: 'Failed to load group details' }));
-    } finally {
-      setLoading(prev => ({ ...prev, group: false }));
-    }
-  };
-
   const fetchBalances = async () => {
-    setLoading(prev => ({ ...prev, balances: true }));
-    try {
-      const response = await axios.get(`${API_URL}/groups/${groupId}/balances`);
-      
-      // Data verification
-      if (!response.data || typeof response.data !== 'object') {
-        throw new Error('Invalid balance data received');
-      }
-      
-      setBalances(response.data.memberBalances || {});
-      if (response.data.members && Array.isArray(response.data.members)) {
-        setMembers(response.data.members);
-      }
-    } catch (error) {
-      console.error('Error fetching balances:', error);
-      setErrors(prev => ({ ...prev, balances: 'Failed to load balances' }));
-    } finally {
-      setLoading(prev => ({ ...prev, balances: false }));
+  setLoading(prev => ({ ...prev, balances: true }));
+  try {
+    const response = await axios.get(`${API_URL}/groups/${groupId}/balances`);
+    
+    // Data verification
+    if (!response.data || typeof response.data !== 'object') {
+      throw new Error('Invalid balance data received');
     }
-  };
+    
+    console.log('Balances response:', response.data);
+    console.log('Members from balances:', response.data.members);
+    
+    setBalances(response.data.memberBalances || {});
+    
+    // IMPORTANT: Only update members if they have UPI data
+    // This prevents overwriting members from fetchGroupDetails
+    if (response.data.members && Array.isArray(response.data.members)) {
+      const membersWithUpi = response.data.members;
+      console.log('Updating members with UPI data:', membersWithUpi);
+      
+      // Merge with existing members to preserve any data
+      setMembers(prevMembers => {
+        if (prevMembers.length === 0) {
+          return membersWithUpi;
+        }
+        
+        // Update existing members with UPI data if available
+        return prevMembers.map(existingMember => {
+          const updatedMember = membersWithUpi.find(m => m.id === existingMember.id);
+          return updatedMember || existingMember;
+        });
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching balances:', error);
+    setErrors(prev => ({ ...prev, balances: 'Failed to load balances' }));
+  } finally {
+    setLoading(prev => ({ ...prev, balances: false }));
+  }
+};
+
+// Also update fetchGroupDetails to preserve UPI data
+const fetchGroupDetails = async () => {
+  setLoading(prev => ({ ...prev, group: true }));
+  try {
+    const response = await axios.get(`${API_URL}/groups/${groupId}`);
+    
+    // Data verification
+    if (!response.data || typeof response.data !== 'object') {
+      throw new Error('Invalid group data received');
+    }
+    
+    console.log('Group details response:', response.data);
+    console.log('Members from group:', response.data.members);
+    
+    setGroup(response.data);
+    
+    // Set members with UPI data
+    if (Array.isArray(response.data.members)) {
+      console.log('Setting members with UPI IDs:', response.data.members);
+      setMembers(response.data.members);
+    } else {
+      setMembers([]);
+    }
+    
+    setExpenses(Array.isArray(response.data.expenses) ? response.data.expenses : []);
+  } catch (error) {
+    console.error('Error fetching group details:', error);
+    setErrors(prev => ({ ...prev, group: 'Failed to load group details' }));
+  } finally {
+    setLoading(prev => ({ ...prev, group: false }));
+  }
+};
 
   const fetchCurrencies = async () => {
     try {
@@ -214,7 +247,10 @@ function GroupDetailPage() {
     setErrors(prev => ({ ...prev, member: '' }));
 
     try {
-      await axios.post(`${API_URL}/groups/${groupId}/members`, { name: newMemberName });
+      await axios.post(`${API_URL}/groups/${groupId}/members`, {
+        name: newMemberName,
+        upi_id: newMemberUpi
+      });
       setNewMemberName('');
       setShowAddMemberModal(false);
       fetchGroupDetails();
@@ -500,13 +536,31 @@ function GroupDetailPage() {
           {members.length === 0 ? (
             <p className="text-gray-500">No members yet</p>
           ) : (
-            <ul className="space-y-2">
+            <ul className="space-y-3">
               {members.map((member) => (
-                <li key={member.id} className="flex items-center">
-                  <span className="bg-blue-100 text-blue-800 rounded-full w-8 h-8 flex items-center justify-center mr-2">
-                    {member.name.charAt(0).toUpperCase()}
-                  </span>
-                  <span>{member.name}</span>
+                <li key={member.id} className="border-b pb-3 last:border-b-0">
+                  <div className="flex items-start gap-3">
+                    <span className="bg-blue-100 text-blue-800 rounded-full w-10 h-10 flex items-center justify-center flex-shrink-0 font-semibold">
+                      {member.name.charAt(0).toUpperCase()}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-gray-900">{member.name}</div>
+                      {member.upi_id ? (
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-xs text-gray-500">UPI:</span>
+                          <code className="text-xs bg-purple-50 text-purple-700 px-2 py-1 rounded font-mono">
+                            {member.upi_id}
+                          </code>
+                          <span className="text-green-600 text-xs">✓</span>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                          <span>⚠️</span>
+                          <span>No UPI ID set</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -574,6 +628,7 @@ function GroupDetailPage() {
               />
             </div>
           )}
+          
           {loading.balances ? (
             <div className="flex justify-center items-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
@@ -638,59 +693,73 @@ function GroupDetailPage() {
                         <ul className="space-y-2">
                           {balance.owes.map((o, i) => {
                             const toMember = members.find(m => m.id === o.to);
+                            const fromMember = member; // Current member who owes
+                            
+                            // ✅ Create complete settlement object with UPI IDs
                             const settlement = {
                               id: `${member.id}-${o.to}-${i}`,
+                              group_id: parseInt(groupId),  // ✅ Add group_id
                               amount: o.amount,
-                              currency: selectedCurrency,
+                              currency: 'INR', // Always use INR for UPI
                               payer_id: member.id,
+                              payer_name: member.name,
+                              payer_upi: fromMember.upi_id,
                               receiver_id: o.to,
-                              description: o.description
+                              receiver_name: toMember?.name || 'Unknown',
+                              receiver_upi: toMember?.upi_id,
+                              description: o.description,
+                              payment_status: 'pending'
                             };
+                            
+                            console.log(`Settlement for ${member.name} -> ${toMember?.name}:`, settlement);
                             
                             return (
                               <li key={i} className="bg-white rounded px-3 py-3 border">
                                 <div className="flex justify-between items-center mb-2">
                                   <span className="text-sm">
                                     <span className="font-medium">{toMember?.name || 'Unknown'}</span>
-                                    <span className="text-gray-500 ml-1">for {o.description}</span>
+                                    {toMember?.upi_id && (
+                                      <span className="ml-2 text-xs text-green-600">✓ UPI</span>
+                                    )}
+                                    {!toMember?.upi_id && (
+                                      <span className="ml-2 text-xs text-amber-600">⚠️ No UPI</span>
+                                    )}
+                                    <span className="text-gray-500 ml-1">• {o.description}</span>
                                   </span>
                                   <span className="font-medium text-red-600">
-                                {formatAmount(o.amount, selectedCurrency)}
-                              </span>
-                              {selectedCurrency !== 'INR' && (
-                                <div className="text-xs text-gray-500">
-                                  ₹{o.amount.toFixed(2)}
+                                    {formatAmount(o.amount, selectedCurrency)}
+                                  </span>
                                 </div>
-                              )}
-                                </div>
+                                {selectedCurrency !== 'INR' && (
+                                  <div className="text-xs text-gray-500 mb-2">
+                                    ₹{o.amount.toFixed(2)}
+                                  </div>
+                                )}
                                 <div className="flex justify-end">
                                   <PayNowButton
                                     settlement={settlement}
                                     groupId={groupId}
                                     onPaymentSuccess={handlePaymentSuccess}
                                     onPaymentError={handlePaymentError}
-                                    className="text-xs"
                                   />
                                 </div>
                               </li>
-                            )
+                            );
                           })}
                         </ul>
                       </div>
                     )}
                   </div>
-                )
+                );
               })}
             </div>
           )}
         </div>
-
-
       </div>
 
       {/* Add Member Modal */}
       {showAddMemberModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 w-full max-w-md">
             <h2 className="text-xl font-bold mb-4">Add Member</h2>
             {errors.member && (
@@ -700,43 +769,79 @@ function GroupDetailPage() {
             )}
             <form onSubmit={addMember}>
               <div className="mb-4">
-                <label htmlFor="memberName" className="block text-gray-700 mb-2">
-                  Member Name
+                <label htmlFor="memberName" className="block text-gray-700 font-medium mb-2">
+                  Member Name *
                 </label>
                 <input
                   type="text"
                   id="memberName"
+                  placeholder="Enter member name"
                   value={newMemberName}
                   onChange={(e) => setNewMemberName(e.target.value)}
-                  className="form-input"
-                  placeholder="Enter member name"
+                  className="border border-gray-300 p-3 rounded-lg w-full focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                   required
                 />
               </div>
+
+              <div className="mb-6">
+                <label htmlFor="memberUpi" className="block text-gray-700 font-medium mb-2">
+                  UPI ID *
+                </label>
+                <input
+                  type="text"
+                  id="memberUpi"
+                  placeholder="e.g., username@paytm or 9876543210@upi"
+                  value={newMemberUpi}
+                  onChange={(e) => setNewMemberUpi(e.target.value)}
+                  className="border border-gray-300 p-3 rounded-lg w-full focus:ring-2 focus:ring-purple-500 focus:border-transparent font-mono text-sm"
+                  pattern="[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}"
+                  title="Enter valid UPI ID (e.g., username@paytm)"
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-2 flex items-start gap-2">
+                  <span className="text-purple-600">💡</span>
+                  <span>This UPI ID will be used to receive payments. Make sure it's correct!</span>
+                </p>
+                <div className="mt-3 bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <p className="text-xs font-medium text-blue-900 mb-2">Common UPI ID formats:</p>
+                  <ul className="text-xs text-blue-800 space-y-1">
+                    <li>• username@paytm</li>
+                    <li>• mobilenumber@ybl (Google Pay)</li>
+                    <li>• username@okaxis (PhonePe)</li>
+                    <li>• mobilenumber@upi</li>
+                  </ul>
+                </div>
+              </div>
+
               <div className="flex justify-end space-x-2">
                 <button
                   type="button"
                   onClick={() => {
                     setShowAddMemberModal(false);
+                    setNewMemberName('');
+                    setNewMemberUpi('');
                     setErrors(prev => ({ ...prev, member: '' }));
                   }}
-                  className="btn btn-secondary"
+                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors font-medium"
                   disabled={loading.addingMember}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="btn btn-primary"
+                  className="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all font-medium disabled:opacity-50 flex items-center gap-2"
                   disabled={loading.addingMember}
                 >
                   {loading.addingMember ? (
                     <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
                       Adding...
                     </>
                   ) : (
-                    'Add'
+                    <>
+                      <span>✓</span>
+                      Add Member
+                    </>
                   )}
                 </button>
               </div>
@@ -744,6 +849,7 @@ function GroupDetailPage() {
           </div>
         </div>
       )}
+
 
       {showAddExpenseModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">

@@ -1,189 +1,248 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+import { QRCodeCanvas } from 'qrcode.react';
 
-const PayNowButton = ({ 
-  settlement, 
-  groupId, 
-  onPaymentSuccess, 
-  onPaymentError,
-  disabled = false,
-  className = ''
-}) => {
+const PayNowButton = ({ settlement, onPaymentSuccess }) => {
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [status, setStatus] = useState(settlement.payment_status || 'pending');
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [upiDeepLink, setUpiDeepLink] = useState('');
 
-  const handlePayNow = async () => {
-    if (!settlement || !groupId) {
-      setError('Invalid payment details');
-      return;
+  const generateUPIDeepLink = () => {
+    if (!settlement.receiver_upi) {
+      throw new Error('Receiver UPI ID not found');
     }
 
-    setLoading(true);
-    setError('');
+    const receiverUpi = settlement.receiver_upi;
+    const receiverName = encodeURIComponent(settlement.receiver_name);
+    const amount = settlement.amount.toFixed(2);
+    const transactionNote = encodeURIComponent(
+      `SplitPal Settlement - ${settlement.payer_name} to ${settlement.receiver_name}`
+    );
 
+    return `upi://pay?pa=${receiverUpi}&pn=${receiverName}&am=${amount}&cu=INR&tn=${transactionNote}`;
+  };
+
+  const handlePayNow = () => {
     try {
-      // Create payment order
-      const orderResponse = await axios.post('http://localhost:5001/api/payments/create-order', {
-        amount: settlement.amount,
-        currency: settlement.currency || 'INR',
-        settlementId: settlement.id,
-        groupId: groupId,
-        payerId: settlement.payer_id,
-        receiverId: settlement.receiver_id
-      });
-
-      if (!orderResponse.data.success) {
-        throw new Error(orderResponse.data.message || 'Failed to create payment order');
+      console.log('PayNow clicked - Settlement data:', settlement);
+      console.log('Receiver UPI ID:', settlement.receiver_upi);
+      console.log('Receiver Name:', settlement.receiver_name);
+      console.log('Amount:', settlement.amount);
+      
+      if (!settlement.receiver_upi) {
+        console.error('Missing receiver_upi in settlement object!');
+        console.log('Full settlement object:', JSON.stringify(settlement, null, 2));
+        alert('Receiver has not set up UPI ID. Please ask them to add their UPI ID first.');
+        return;
       }
 
-      const { orderId, amount, currency } = orderResponse.data.data;
+      const deepLink = generateUPIDeepLink();
+      console.log('Generated UPI deep link:', deepLink);
+      setUpiDeepLink(deepLink);
+      setShowPaymentModal(true);
+    } catch (error) {
+      console.error('Error generating UPI link:', error);
+      alert(error.message || 'Failed to generate payment link');
+    }
+  };
 
-      // For now, simulate payment gateway integration
-      // In production, this would integrate with actual Razorpay
-      const mockPaymentResult = await simulatePaymentGateway({
-        orderId,
-        amount,
-        currency,
-        settlementId: settlement.id
-      });
+  const handlePaymentConfirmation = async (confirmed) => {
+    if (confirmed) {
+      try {
+        setLoading(true);
 
-      if (mockPaymentResult.success) {
-        // Verify payment
-        const verifyResponse = await axios.post('http://localhost:5001/api/payments/verify', {
-          orderId: orderId,
-          paymentId: mockPaymentResult.paymentId,
-          signature: mockPaymentResult.signature,
-          settlementId: settlement.id
+        console.log('Confirming payment with data:', {
+          settlementId: settlement.id,
+          groupId: settlement.group_id,
+          payerId: settlement.payer_id,
+          receiverId: settlement.receiver_id,
+          amount: settlement.amount,
+          description: settlement.description
         });
 
-        if (verifyResponse.data.success) {
+        const response = await fetch('http://localhost:5001/api/payments/confirm-upi', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            settlementId: settlement.id,
+            groupId: settlement.group_id,
+            payerId: settlement.payer_id,
+            receiverId: settlement.receiver_id,
+            amount: settlement.amount,
+            description: settlement.description,
+            paymentMethod: 'upi',
+            status: 'completed',
+          }),
+        });
+
+        const data = await response.json();
+        console.log('Payment confirmation response:', data);
+
+        if (data.success) {
+          setStatus('completed');
+          alert('Payment confirmed successfully!');
+
           if (onPaymentSuccess) {
             onPaymentSuccess({
               settlementId: settlement.id,
-              paymentId: mockPaymentResult.paymentId,
-              amount: amount,
-              currency: currency
+              transactionId: data.data?.transactionId,
+              status: 'completed'
             });
           }
         } else {
-          throw new Error('Payment verification failed');
+          throw new Error(data.message || 'Failed to confirm payment');
         }
-      } else {
-        throw new Error(mockPaymentResult.error || 'Payment failed');
+      } catch (error) {
+        console.error('Error confirming payment:', error);
+        alert('Failed to confirm payment: ' + error.message);
+      } finally {
+        setLoading(false);
+        setShowPaymentModal(false);
       }
-    } catch (error) {
-      console.error('Payment error:', error);
-      const errorMessage = error.response?.data?.message || error.message || 'Payment failed';
-      setError(errorMessage);
-      if (onPaymentError) {
-        onPaymentError(errorMessage);
-      }
-    } finally {
-      setLoading(false);
+    } else {
+      setShowPaymentModal(false);
     }
   };
 
-  // Mock payment gateway simulation
-  const simulatePaymentGateway = async ({ orderId, amount, currency, settlementId }) => {
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // Simulate 90% success rate
-        const success = Math.random() > 0.1;
-        
-        if (success) {
-          resolve({
-            success: true,
-            paymentId: `pay_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            signature: `sig_${Math.random().toString(36).substr(2, 16)}`,
-            orderId,
-            amount,
-            currency
-          });
-        } else {
-          resolve({
-            success: false,
-            error: 'Payment declined by bank'
-          });
-        }
-      }, 2000); // Simulate 2 second processing time
-    });
-  };
-
-  const formatAmount = (amount, currency = 'INR') => {
-    const currencySymbols = {
-      'INR': '₹',
-      'USD': '$',
-      'EUR': '€',
-      'GBP': '£',
-      'JPY': '¥',
-      'CAD': 'C$',
-      'AUD': 'A$',
-      'CHF': 'CHF',
-      'CNY': '¥',
-      'SGD': 'S$'
-    };
-
-    const symbol = currencySymbols[currency] || currency;
-    const decimals = currency === 'JPY' ? 0 : 2;
-    
-    return `${symbol}${parseFloat(amount).toFixed(decimals)}`;
-  };
-
-  if (!settlement || settlement.amount <= 0) {
-    return null;
-  }
+  const isCompleted = status === 'completed';
+  const isFailed = status === 'failed';
 
   return (
-    <div className={`pay-now-button ${className}`}>
+    <>
       <button
         onClick={handlePayNow}
-        disabled={disabled || loading}
+        disabled={loading || isCompleted}
         className={`
-          inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md
-          ${loading 
-            ? 'bg-gray-400 cursor-not-allowed' 
-            : 'bg-green-600 hover:bg-green-700 focus:ring-green-500'
+          inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium
+          transition-all duration-200 ease-in-out
+          ${isCompleted
+            ? 'bg-green-100 text-green-700 cursor-not-allowed'
+            : isFailed
+            ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
+            : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white hover:from-purple-700 hover:to-pink-700 active:scale-95 shadow-md'
           }
-          text-white shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2
+          ${loading ? 'opacity-75 cursor-wait' : ''}
           disabled:opacity-50 disabled:cursor-not-allowed
-          transition-colors duration-200
         `}
       >
         {loading ? (
           <>
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-            Processing...
+            <span className="animate-spin">⏳</span>
+            <span>Processing...</span>
+          </>
+        ) : isCompleted ? (
+          <>
+            <span>✅</span>
+            <span>Paid</span>
           </>
         ) : (
           <>
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
-            </svg>
-            Pay {formatAmount(settlement.amount, settlement.currency)}
+            <span>📱</span>
+            <span>{isFailed ? 'Retry Payment' : 'Pay with UPI'}</span>
           </>
         )}
       </button>
-      
-      {error && (
-        <div className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-md p-2">
-          <div className="flex items-center">
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            {error}
+
+      {showPaymentModal && !isCompleted && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 relative shadow-2xl">
+            <button
+              onClick={() => setShowPaymentModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              ❌
+            </button>
+
+            <div className="text-center mb-6">
+              <div className="w-20 h-20 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg text-white text-4xl">
+                🧾
+              </div>
+              <h3 className="text-2xl font-bold text-gray-900 mb-2">
+                Scan QR Code to Pay
+              </h3>
+              <p className="text-gray-600">
+                Open any UPI app and scan this QR code to complete payment
+              </p>
+            </div>
+
+            <div className="flex justify-center mb-6">
+              <div className="bg-white p-6 rounded-xl border-4 border-purple-200 shadow-lg">
+                <QRCodeCanvas 
+                  value={upiDeepLink} 
+                  size={240} 
+                  level="H" 
+                  includeMargin={true}
+                  imageSettings={{
+                    excavate: true,
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-br from-blue-50 to-purple-50 border-2 border-purple-200 rounded-xl p-5 mb-6">
+              <div className="flex justify-between items-center mb-3">
+                <span className="text-sm font-medium text-gray-600">Amount</span>
+                <span className="text-2xl font-bold text-gray-900">₹{settlement.amount.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between items-center mb-3">
+                <span className="text-sm font-medium text-gray-600">Paying to</span>
+                <span className="font-semibold text-gray-900">{settlement.receiver_name}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium text-gray-600">UPI ID</span>
+                <span className="text-sm font-mono text-purple-700">{settlement.receiver_upi}</span>
+              </div>
+            </div>
+
+            <div className="bg-gray-50 rounded-lg p-4 mb-6">
+              <p className="text-xs font-medium text-gray-600 mb-3 text-center">Scan with any UPI app</p>
+              <div className="flex justify-center gap-4 flex-wrap text-xs font-medium text-gray-700">
+                <span className="bg-white px-3 py-1.5 rounded-full border border-gray-200">Google Pay</span>
+                <span className="bg-white px-3 py-1.5 rounded-full border border-gray-200">PhonePe</span>
+                <span className="bg-white px-3 py-1.5 rounded-full border border-gray-200">Paytm</span>
+                <span className="bg-white px-3 py-1.5 rounded-full border border-gray-200">BHIM</span>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-6 flex gap-3">
+              <span className="text-amber-600 text-lg mt-0.5">💡</span>
+              <p className="text-sm text-amber-800">
+                After completing the payment in your UPI app, return here and click "Payment Completed" below.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <button
+                onClick={() => handlePaymentConfirmation(true)}
+                disabled={loading}
+                className="w-full bg-gradient-to-r from-green-600 to-green-500 text-white py-3.5 rounded-lg font-semibold hover:from-green-700 hover:to-green-600 disabled:opacity-50 flex items-center justify-center gap-2 shadow-md transition-all"
+              >
+                {loading ? (
+                  <>
+                    <span className="animate-spin">⏳</span>
+                    Confirming...
+                  </>
+                ) : (
+                  <>
+                    ✅ Payment Completed
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={() => handlePaymentConfirmation(false)}
+                disabled={loading}
+                className="w-full bg-gray-100 text-gray-700 py-3.5 rounded-lg font-semibold hover:bg-gray-200 disabled:opacity-50 transition-all"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
-      
-      {loading && (
-        <div className="mt-2 text-sm text-blue-600 bg-blue-50 border border-blue-200 rounded-md p-2">
-          <div className="flex items-center">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
-            Connecting to payment gateway...
-          </div>
-        </div>
-      )}
-    </div>
+    </>
   );
 };
 

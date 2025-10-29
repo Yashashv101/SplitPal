@@ -5,8 +5,7 @@ const mysql = require('mysql2/promise');
 const multer = require('multer');
 const path = require('path');
 const Tesseract = require('tesseract.js');
-  const currencyService = require('./services/currencyService');
-
+const currencyService = require('./services/currencyService');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -14,6 +13,7 @@ const PORT = process.env.PORT || 5001;
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -114,8 +114,13 @@ app.get('/api/groups/:id', async (req, res) => {
     
     const group = groups[0];
     
-    // Get members
-    const [members] = await pool.query('SELECT * FROM members WHERE group_id = ?', [groupId]);
+    // Get members - EXPLICITLY SELECT upi_id
+    const [members] = await pool.query(
+      'SELECT id, group_id, name, email, upi_id, created_at FROM members WHERE group_id = ?', 
+      [groupId]
+    );
+    
+    console.log('Fetched members with UPI:', members);
     
     // Get expenses
     const [expenses] = await pool.query(`
@@ -140,26 +145,99 @@ app.get('/api/groups/:id', async (req, res) => {
 // Add a member to a group
 app.post('/api/groups/:id/members', async (req, res) => {
   const groupId = req.params.id;
-  const { name } = req.body;
+  const { name, upi_id } = req.body;
+  
+  console.log('=== ADD MEMBER REQUEST ===');
+  console.log('Group ID:', groupId);
+  console.log('Request body:', req.body);
+  console.log('name:', name);
+  console.log('upi_id:', upi_id);
+  console.log('upi_id type:', typeof upi_id);
   
   if (!name) {
     return res.status(400).json({ error: 'Member name is required' });
   }
   
+  // UPI ID validation
+  const upiRegex = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9]{1,63}$/;
+  if (upi_id && !upiRegex.test(upi_id)) {
+    console.log('UPI ID validation failed for:', upi_id);
+    return res.status(400).json({ error: 'Invalid UPI ID format' });
+  }
+  
   try {
-    const [result] = await pool.query(
-      'INSERT INTO members (name, group_id) VALUES (?, ?)',
-      [name, groupId]
+    const upiValue = upi_id || null;
+    console.log('UPI value to insert:', upiValue);
+    
+    // Check if the column exists first
+    const [columns] = await pool.query('SHOW COLUMNS FROM members LIKE "upi_id"');
+    console.log('upi_id column exists:', columns.length > 0);
+    
+    if (columns.length === 0) {
+      console.error('ERROR: upi_id column does not exist in members table!');
+      return res.status(500).json({ 
+        error: 'Database schema error: upi_id column missing',
+        solution: 'Run: ALTER TABLE members ADD COLUMN upi_id VARCHAR(255) NULL AFTER email;'
+      });
+    }
+    
+    // Insert member with explicit column names
+    const insertQuery = 'INSERT INTO members (group_id, name, upi_id) VALUES (?, ?, ?)';
+    const insertValues = [groupId, name, upiValue];
+    
+    console.log('SQL Query:', insertQuery);
+    console.log('SQL Values:', insertValues);
+    
+    const [result] = await pool.query(insertQuery, insertValues);
+    
+    console.log('Insert result:', result);
+    console.log('New member ID:', result.insertId);
+    
+    // Fetch the created member with explicit columns
+    const [newMember] = await pool.query(
+      'SELECT id, group_id, name, email, upi_id, created_at FROM members WHERE id = ?', 
+      [result.insertId]
     );
     
-    const [newMember] = await pool.query('SELECT * FROM members WHERE id = ?', [result.insertId]);
+    console.log('Fetched member:', newMember[0]);
+    console.log('Fetched upi_id:', newMember[0]?.upi_id);
+    console.log('=== END ADD MEMBER ===\n');
+    
+    if (newMember.length === 0) {
+      return res.status(500).json({ error: 'Failed to fetch created member' });
+    }
+    
     res.status(201).json(newMember[0]);
   } catch (error) {
     console.error('Error adding member:', error);
-    res.status(500).json({ error: 'Failed to add member' });
+    console.log('Error code:', error.code);
+    console.log('Error errno:', error.errno);
+    res.status(500).json({ 
+      error: 'Failed to add member',
+      details: error.message,
+      code: error.code
+    });
   }
 });
+// Add this temporary debug endpoint to server.js to check table structure
 
+app.get('/api/debug/members-table', async (req, res) => {
+  try {
+    // Get table structure
+    const [columns] = await pool.query('DESCRIBE members');
+    
+    // Get sample data
+    const [sampleData] = await pool.query('SELECT * FROM members LIMIT 5');
+    
+    res.json({
+      tableStructure: columns,
+      sampleData: sampleData,
+      note: 'Check if upi_id column exists and its properties'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 // Add an expense to a group
 app.post('/api/groups/:id/expenses', async (req, res) => {
   const groupId = req.params.id;
@@ -232,8 +310,13 @@ app.post('/api/groups/:id/expenses', async (req, res) => {
 app.get('/api/groups/:id/balances', async (req, res) => {
   const groupId = req.params.id;
   try {
-    // Get members
-    const [members] = await pool.query('SELECT id, name FROM members WHERE group_id = ?', [groupId]);
+    // Get members - EXPLICITLY SELECT upi_id
+    const [members] = await pool.query(
+      'SELECT id, name, email, upi_id FROM members WHERE group_id = ?', 
+      [groupId]
+    );
+    
+    console.log('Balances endpoint - members with UPI:', members);
 
     // Initialize balances
     const memberBalances = {};
@@ -269,7 +352,6 @@ app.get('/api/groups/:id/balances', async (req, res) => {
 
         // Track how much the payer should get back
         memberBalances[payerId].getsBack += share;
-        memberBalances[payerId].paid += (memberId === payerId ? 0 : 0); // already counted separately
       }
     });
 
@@ -754,205 +836,219 @@ app.put('/api/groups/:id/currency', async (req, res) => {
 
 // Payment Gateway Integration Endpoints
 
-// Create Razorpay order for settlement
-app.post('/api/payments/create-order', async (req, res) => {
-  try {
-    const { amount, currency, settlementId, groupId, payerId, receiverId } = req.body;
+// ==================== UPI PAYMENT ENDPOINTS ====================
+// NO RAZORPAY - Pure UPI Deep Link Implementation
 
-    if (!amount || !currency || !settlementId || !groupId || !payerId || !receiverId) {
+// 1. Confirm UPI Payment
+app.post('/api/payments/confirm-upi', async (req, res) => {
+  try {
+    const { settlementId, paymentMethod, status, groupId, payerId, receiverId, amount, description } = req.body;
+
+    console.log('=== UPI PAYMENT CONFIRMATION ===');
+    console.log('Request body:', req.body);
+
+    // Validation
+    if (!paymentMethod || !status) {
       return res.status(400).json({
         success: false,
-        message: 'All payment details are required'
+        message: 'Payment method and status are required'
       });
     }
 
-    // For now, create a mock order - will be replaced with actual Razorpay integration
-    const orderId = `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+    // Parse settlementId - it might be a composite ID like "21-22-0"
     let actualSettlementId = null;
     
+    if (settlementId && typeof settlementId === 'string' && !settlementId.includes('-')) {
+      actualSettlementId = parseInt(settlementId, 10);
+    }
+
+    console.log('Settlement ID:', settlementId);
+    console.log('Parsed Settlement ID:', actualSettlementId);
+    console.log('Status:', status);
+
     if (dbConnected) {
-      try {
-        console.log('Attempting to create settlement with values:', {
-          payerId, receiverId, amount, groupId
-        });
-        
-        // First, create an actual settlement record in the database
-        const [settlementResult] = await pool.execute(
-          'INSERT INTO settlements (payer_id, receiver_id, amount, group_id, date) VALUES (?, ?, ?, ?, CURDATE())',
-          [payerId, receiverId, amount, groupId]
-        );
-        
-        actualSettlementId = settlementResult.insertId;
-        console.log('Created settlement with ID:', actualSettlementId);
-        if (!actualSettlementId || isNaN(actualSettlementId)) {
-          console.error('Invalid settlementId:', actualSettlementId);
-          return res.status(500).json({
-            success: false,
-            message: 'Invalid settlement ID while creating payment transaction'
-          });
-        }
-        
-       console.log('Attempting to create payment transaction with values:', {
-          settlement_id: actualSettlementId,
-          group_id: groupId,
-          payer_id: payerId,
-          receiver_id: receiverId,
-          amount,
-          currency,
-          orderId
-        });
-        
-        // Now create payment transaction record with the actual settlement ID
-        await pool.execute(
-          `INSERT INTO payment_transactions 
-           (settlement_id, group_id, payer_id, receiver_id, amount, currency, payment_method, transaction_id, payment_status, description) 
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [actualSettlementId, groupId, payerId, receiverId, amount, currency, 'razorpay', orderId, 'pending', `Settlement payment via Razorpay (frontend ref: ${settlementId})`]
-        );
-        console.log('Created payment transaction for settlement ID:', actualSettlementId);
-      } catch (dbError) {
-        console.error('Database error during payment order creation:', dbError);
-        console.error('Error details:', {
-          code: dbError.code,
-          errno: dbError.errno,
-          sqlMessage: dbError.sqlMessage,
-          sql: dbError.sql
-        });
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to create payment order'
-        });
-      }
-    }
-
-    res.json({
-      success: true,
-      data: {
-        orderId,
-        amount,
-        currency,
-        settlementId: actualSettlementId || settlementId,
-        status: 'created'
-      }
-    });
-  } catch (error) {
-    console.error('Error creating payment order:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create payment order'
-    });
-  }
-});
-
-// Verify payment and update settlement
-app.post('/api/payments/verify', async (req, res) => {
-  try {
-    const { orderId, paymentId, signature, settlementId } = req.body;
-
-    if (!orderId || !paymentId || !settlementId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment verification details are required'
-      });
-    }
-
-    // For now, mock verification - will be replaced with actual Razorpay verification
-    const isValid = true; // Mock verification result
-     const settlementNumericId = parseInt(settlementId, 10);
-
-    if (dbConnected && isValid) {
-      // Start transaction for ACID compliance
       const connection = await pool.getConnection();
-      await connection.beginTransaction();
-
+      
       try {
-        // Update payment transaction status
-        await connection.execute(
-          `UPDATE payment_transactions 
-           SET payment_status = ?, gateway_transaction_id = ?, updated_at = CURRENT_TIMESTAMP 
-           WHERE transaction_id = ?`,
-          ['completed', paymentId, orderId]
+        await connection.beginTransaction();
+
+        // Generate unique transaction ID
+        const transactionId = `UPI_${Date.now()}_${payerId}_${receiverId}`;
+        
+        console.log('Generated transaction ID:', transactionId);
+
+        // Create payment transaction record matching your table structure
+        const [transactionResult] = await connection.execute(
+          `INSERT INTO payment_transactions 
+           (settlement_id, group_id, payer_id, receiver_id, amount, currency, 
+            original_amount, original_currency, payment_method, payment_gateway, 
+            transaction_id, payment_status, net_amount, description) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            actualSettlementId,
+            groupId,
+            payerId,
+            receiverId,
+            amount,
+            'INR',  // currency (NOT NULL)
+            amount, // original_amount
+            'INR',  // original_currency
+            'upi',
+            'upi_deeplink',
+            transactionId,
+            status,
+            amount,
+            description || 'UPI payment via QR code'
+          ]
         );
 
-        // Update settlement status
-        await connection.execute(
-          `UPDATE settlements 
-           SET payment_status = ?, transaction_id = ?, payment_method = 'razorpay' 
-           WHERE id = ?`,
-          ['completed', paymentId, settlementNumericId]
-        );
+        console.log('Payment transaction created with ID:', transactionResult.insertId);
+
+        // If we have an actual settlement record, update it
+        if (actualSettlementId && !isNaN(actualSettlementId)) {
+          const [updateResult] = await connection.execute(
+            `UPDATE settlements 
+             SET payment_status = ?, 
+                 transaction_id = ?,
+                 payment_method = 'upi'
+             WHERE id = ?`,
+            [status, transactionId, actualSettlementId]
+          );
+          console.log('Settlement updated, rows affected:', updateResult.affectedRows);
+        } else {
+          // Create a new settlement record if it doesn't exist
+          console.log('Creating new settlement record');
+          const [settlementResult] = await connection.execute(
+            `INSERT INTO settlements 
+             (group_id, payer_id, receiver_id, amount, date, payment_status, transaction_id, payment_method)
+             VALUES (?, ?, ?, ?, CURDATE(), ?, ?, 'upi')`,
+            [groupId, payerId, receiverId, amount, status, transactionId]
+          );
+          console.log('New settlement created with ID:', settlementResult.insertId);
+        }
 
         await connection.commit();
         connection.release();
 
+        console.log('=== PAYMENT CONFIRMATION SUCCESS ===\n');
+
         res.json({
           success: true,
-          message: 'Payment verified and settlement updated successfully'
+          message: `UPI payment ${status} successfully`,
+          data: {
+            settlementId: actualSettlementId || 'new',
+            transactionId,
+            status,
+            paymentTransactionId: transactionResult.insertId
+          }
         });
       } catch (error) {
         await connection.rollback();
         connection.release();
+        console.error('Transaction error:', error);
         throw error;
       }
     } else {
+      // Mock mode - no database
+      console.log('Mock mode - no database connection');
       res.json({
-        success: isValid,
-        message: isValid ? 'Payment verified (mock mode)' : 'Payment verification failed'
+        success: true,
+        message: `UPI payment ${status} (mock mode)`,
+        data: {
+          settlementId: settlementId,
+          transactionId: `UPI_MOCK_${Date.now()}`,
+          status
+        }
       });
     }
   } catch (error) {
-    console.error('Error verifying payment:', error);
+    console.error('=== PAYMENT CONFIRMATION ERROR ===');
+    console.error('Error:', error);
+    console.error('Stack:', error.stack);
     res.status(500).json({
       success: false,
-      message: 'Failed to verify payment'
+      message: 'Failed to confirm UPI payment',
+      error: error.message
     });
   }
 });
 
-// Get transaction history for a group
-app.get('/api/groups/:id/transactions', async (req, res) => {
+// 2. Get Settlement Details with UPI IDs
+app.get('/api/groups/:id/settlements', async (req, res) => {
   try {
     const { id } = req.params;
-    const { page = 1, limit = 20 } = req.query;
-    const offset = (page - 1) * limit;
 
     if (dbConnected) {
-      const [transactions] = await pool.execute(
-        `SELECT pt.*, 
+      const [settlements] = await pool.execute(
+        `SELECT s.*, 
                 m1.name as payer_name, 
+                m1.email as payer_email,
+                m1.upi_id as payer_upi,
                 m2.name as receiver_name,
-                s.date as settlement_date
-         FROM payment_transactions pt
-         LEFT JOIN members m1 ON pt.payer_id = m1.id
-         LEFT JOIN members m2 ON pt.receiver_id = m2.id
-         LEFT JOIN settlements s ON pt.settlement_id = s.id
-         WHERE pt.group_id = ?
-         ORDER BY pt.created_at DESC
-         LIMIT ? OFFSET ?`,
-        [id, parseInt(limit), parseInt(offset)]
-      );
-
-      const [countResult] = await pool.execute(
-        'SELECT COUNT(*) as total FROM payment_transactions WHERE group_id = ?',
+                m2.email as receiver_email,
+                m2.upi_id as receiver_upi
+         FROM settlements s
+         LEFT JOIN members m1 ON s.payer_id = m1.id
+         LEFT JOIN members m2 ON s.receiver_id = m2.id
+         WHERE s.group_id = ?
+         ORDER BY s.payment_status ASC, s.date DESC`,
         [id]
       );
 
       res.json({
         success: true,
-        data: {
-          transactions,
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
-            total: countResult[0].total,
-            totalPages: Math.ceil(countResult[0].total / limit)
-          }
-        }
+        data: settlements
       });
     } else {
-      // Mock transaction data
+      // Mock data with sample UPI IDs
       res.json({
+        success: true,
+        data: [
+          {
+            id: 1,
+            group_id: parseInt(id),
+            payer_id: 1,
+            receiver_id: 2,
+            amount: 250.00,
+            currency: 'INR',
+            date: new Date().toISOString().split('T')[0],
+            payment_status: 'pending',
+            payer_name: 'John Doe',
+            payer_email: 'john@example.com',
+            payer_upi: 'john@paytm',
+            receiver_name: 'Jane Smith',
+            receiver_email: 'jane@example.com',
+            receiver_upi: 'jane@okaxis'
+          }
+        ]
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching settlements:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch settlements',
+      error: error.message
+    });
+  }
+});
+
+// 3. Get transaction history for a group
+
+app.get('/api/groups/:id/transactions', async (req, res) => {
+  try {
+    const groupId = parseInt(req.params.id);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    console.log('=== FETCHING TRANSACTIONS ===');
+    console.log('Group ID:', groupId);
+    console.log('Pagination:', { page, limit, offset });
+
+    if (!dbConnected) {
+      console.log('Database not connected - returning empty result');
+      return res.json({
         success: true,
         data: {
           transactions: [],
@@ -965,14 +1061,599 @@ app.get('/api/groups/:id/transactions', async (req, res) => {
         }
       });
     }
+
+    try {
+      // First, check if there are any transactions for this group
+      const [countResult] = await pool.execute(
+        'SELECT COUNT(*) as total FROM payment_transactions WHERE group_id = ?',
+        [groupId]
+      );
+
+      const total = countResult[0].total;
+      console.log('Total transactions found:', total);
+
+      if (total === 0) {
+        console.log('No transactions found for this group');
+        return res.json({
+          success: true,
+          data: {
+            transactions: [],
+            pagination: {
+              page: 1,
+              limit: limit,
+              total: 0,
+              totalPages: 0
+            }
+          }
+        });
+      }
+
+      // Fetch transactions with proper JOINs
+      const [transactions] = await pool.execute(
+        `SELECT 
+          pt.id,
+          pt.settlement_id,
+          pt.group_id,
+          pt.payer_id,
+          pt.receiver_id,
+          pt.amount,
+          pt.currency,
+          pt.payment_method,
+          pt.payment_gateway,
+          pt.transaction_id,
+          pt.payment_status,
+          pt.description,
+          pt.created_at,
+          pt.updated_at,
+          m1.name as payer_name,
+          m1.upi_id as payer_upi,
+          m2.name as receiver_name,
+          m2.upi_id as receiver_upi
+         FROM payment_transactions pt
+         LEFT JOIN members m1 ON pt.payer_id = m1.id
+         LEFT JOIN members m2 ON pt.receiver_id = m2.id
+         WHERE pt.group_id = ?
+         ORDER BY pt.created_at DESC
+         LIMIT ${limit} OFFSET ${offset}`,
+        [groupId, limit, offset]
+      );
+
+      console.log(`Found ${transactions.length} transactions`);
+      console.log('Sample transaction:', transactions[0]);
+
+      const totalPages = Math.ceil(total / limit);
+
+      res.json({
+        success: true,
+        data: {
+          transactions: transactions,
+          pagination: {
+            page: page,
+            limit: limit,
+            total: total,
+            totalPages: totalPages
+          }
+        }
+      });
+
+      console.log('=== TRANSACTIONS FETCHED SUCCESSFULLY ===\n');
+
+    } catch (queryError) {
+      console.error('Query execution error:', queryError);
+      console.error('SQL State:', queryError.sqlState);
+      console.error('SQL Message:', queryError.sqlMessage);
+      console.error('SQL:', queryError.sql);
+      throw queryError;
+    }
+
   } catch (error) {
-    console.error('Error fetching transactions:', error);
+    console.error('=== ERROR FETCHING TRANSACTIONS ===');
+    console.error('Error:', error.message);
+    console.error('Code:', error.code);
+    console.error('Errno:', error.errno);
+    console.error('Stack:', error.stack);
+    
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch transaction history'
+      message: 'Failed to fetch transaction history',
+      error: error.message,
+      code: error.code,
+      details: error.sqlMessage || error.message
     });
   }
 });
+// 4. Update member UPI ID
+app.put('/api/members/:id/upi', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { upiId } = req.body;
+
+    if (!upiId) {
+      return res.status(400).json({
+        success: false,
+        message: 'UPI ID is required'
+      });
+    }
+
+    // Basic UPI ID validation
+    const upiRegex = /^[\w.-]+@[\w.-]+$/;
+    if (!upiRegex.test(upiId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid UPI ID format. Example: username@bank'
+      });
+    }
+
+    if (dbConnected) {
+      await pool.execute(
+        'UPDATE members SET upi_id = ? WHERE id = ?',
+        [upiId, id]
+      );
+
+      res.json({
+        success: true,
+        message: 'UPI ID updated successfully',
+        data: { memberId: parseInt(id), upiId }
+      });
+    } else {
+      // Mock mode
+      res.json({
+        success: true,
+        message: 'UPI ID updated successfully (mock mode)',
+        data: { memberId: parseInt(id), upiId }
+      });
+    }
+  } catch (error) {
+    console.error('Error updating UPI ID:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update UPI ID',
+      error: error.message
+    });
+  }
+});
+
+// 5. Get member details including UPI ID
+app.get('/api/members/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (dbConnected) {
+      const [members] = await pool.execute(
+        'SELECT id, name, email, upi_id FROM members WHERE id = ?',
+        [id]
+      );
+
+      if (members.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Member not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: members[0]
+      });
+    } else {
+      // Mock data
+      res.json({
+        success: true,
+        data: {
+          id: parseInt(id),
+          name: 'Mock User',
+          email: 'user@example.com',
+          upi_id: 'user@paytm'
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching member:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch member details',
+      error: error.message
+    });
+  }
+});
+
+// 6. Cancel/Fail payment (optional - for dispute handling)
+app.post('/api/payments/cancel', async (req, res) => {
+  try {
+    const { settlementId, reason } = req.body;
+
+    if (!settlementId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Settlement ID is required'
+      });
+    }
+
+    console.log('Cancelling payment for settlement:', settlementId, 'Reason:', reason);
+
+    const settlementNumericId = parseInt(settlementId, 10);
+
+    if (dbConnected) {
+      const connection = await pool.getConnection();
+      
+      try {
+        await connection.beginTransaction();
+
+        // Update settlement status to failed
+        await connection.execute(
+          `UPDATE settlements 
+           SET payment_status = 'failed'
+           WHERE id = ?`,
+          [settlementNumericId]
+        );
+
+        // If there's an existing transaction, update it
+        await connection.execute(
+          `UPDATE payment_transactions 
+           SET payment_status = 'failed',
+               description = CONCAT(COALESCE(description, ''), ' - Cancelled: ', ?)
+           WHERE settlement_id = ? AND payment_status = 'pending'`,
+          [reason || 'User cancelled', settlementNumericId]
+        );
+
+        await connection.commit();
+        connection.release();
+
+        res.json({
+          success: true,
+          message: 'Payment cancelled successfully'
+        });
+      } catch (error) {
+        await connection.rollback();
+        connection.release();
+        throw error;
+      }
+    } else {
+      // Mock mode
+      res.json({
+        success: true,
+        message: 'Payment cancelled (mock mode)'
+      });
+    }
+  } catch (error) {
+    console.error('Error cancelling payment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel payment',
+      error: error.message
+    });
+  }
+});
+
+// // Create Razorpay order for settlement
+// app.post('/api/payments/create-order', async (req, res) => {
+//   try {
+//     const { settlementId, amount, currency = 'INR', groupId, payerId, receiverId } = req.body;
+
+//     if (!settlementId || !amount || !groupId || !payerId || !receiverId) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Required payment details are missing'
+//       });
+//     }
+
+//     // Create Razorpay order
+//     const options = {
+//       amount: Math.round(amount * 100), // Amount in paise
+//       currency: currency,
+//       receipt: `settlement_${settlementId}_${Date.now()}`,
+//       notes: {
+//         settlement_id: settlementId,
+//         group_id: groupId,
+//         payer_id: payerId,
+//         receiver_id: receiverId
+//       }
+//     };
+
+//     const order = await razorpay.orders.create(options);
+
+//     if (dbConnected) {
+//       const connection = await pool.getConnection();
+//       await connection.beginTransaction();
+
+//       try {
+//         // Create payment transaction record
+//         const [result] = await connection.execute(
+//           `INSERT INTO payment_transactions 
+//            (settlement_id, group_id, payer_id, receiver_id, amount, currency, 
+//             payment_method, payment_gateway, transaction_id, payment_status, 
+//             created_at) 
+//            VALUES (?, ?, ?, ?, ?, ?, 'razorpay', 'razorpay', ?, 'pending', CURRENT_TIMESTAMP)`,
+//           [settlementId, groupId, payerId, receiverId, amount, currency, order.id]
+//         );
+
+//         // Update settlement to pending status
+//         await connection.execute(
+//           `UPDATE settlements 
+//            SET payment_status = 'pending', transaction_id = ?, payment_method = 'razorpay' 
+//            WHERE id = ?`,
+//           [order.id, settlementId]
+//         );
+
+//         await connection.commit();
+//         connection.release();
+
+//         res.json({
+//           success: true,
+//           data: {
+//             orderId: order.id,
+//             amount: order.amount,
+//             currency: order.currency,
+//             key_id: process.env.RAZORPAY_KEY_ID,
+//             transactionId: result.insertId
+//           }
+//         });
+//       } catch (error) {
+//         await connection.rollback();
+//         connection.release();
+//         throw error;
+//       }
+//     } else {
+//       // Mock mode
+//       res.json({
+//         success: true,
+//         data: {
+//           orderId: order.id,
+//           amount: order.amount,
+//           currency: order.currency,
+//           key_id: process.env.RAZORPAY_KEY_ID
+//         }
+//       });
+//     }
+//   } catch (error) {
+//     console.error('Error creating Razorpay order:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to create payment order',
+//       error: error.message
+//     });
+//   }
+// });
+
+// // Verify payment and update settlement
+// app.post('/api/payments/verify', async (req, res) => {
+//   try {
+//     const { orderId, paymentId, signature, settlementId } = req.body;
+
+//     if (!orderId || !paymentId || !signature || !settlementId) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Payment verification details are required'
+//       });
+//     }
+
+//     // Verify Razorpay signature
+//     const generatedSignature = crypto
+//       .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+//       .update(`${orderId}|${paymentId}`)
+//       .digest('hex');
+
+//     const isValid = generatedSignature === signature;
+//     const settlementNumericId = parseInt(settlementId, 10);
+
+//     if (dbConnected) {
+//       const connection = await pool.getConnection();
+//       await connection.beginTransaction();
+
+//       try {
+//         if (isValid) {
+//           // Fetch payment details from Razorpay
+//           const payment = await razorpay.payments.fetch(paymentId);
+
+//           // Update payment transaction status
+//           await connection.execute(
+//             `UPDATE payment_transactions 
+//              SET payment_status = 'completed', 
+//                  gateway_transaction_id = ?, 
+//                  gateway_response = ?,
+//                  fees = ?,
+//                  net_amount = amount - ?,
+//                  updated_at = CURRENT_TIMESTAMP 
+//              WHERE transaction_id = ?`,
+//             [
+//               paymentId, 
+//               JSON.stringify(payment),
+//               payment.fee ? payment.fee / 100 : 0,
+//               payment.fee ? payment.fee / 100 : 0,
+//               orderId
+//             ]
+//           );
+
+//           // Update settlement status
+//           await connection.execute(
+//             `UPDATE settlements 
+//              SET payment_status = 'completed', 
+//                  transaction_id = ? 
+//              WHERE id = ?`,
+//             [paymentId, settlementNumericId]
+//           );
+
+//           await connection.commit();
+          
+//           res.json({
+//             success: true,
+//             message: 'Payment verified and settlement completed successfully'
+//           });
+//         } else {
+//           // Payment verification failed
+//           await connection.execute(
+//             `UPDATE payment_transactions 
+//              SET payment_status = 'failed', 
+//                  gateway_transaction_id = ?,
+//                  updated_at = CURRENT_TIMESTAMP 
+//              WHERE transaction_id = ?`,
+//             [paymentId, orderId]
+//           );
+
+//           await connection.execute(
+//             `UPDATE settlements 
+//              SET payment_status = 'failed' 
+//              WHERE id = ?`,
+//             [settlementNumericId]
+//           );
+
+//           await connection.commit();
+
+//           res.status(400).json({
+//             success: false,
+//             message: 'Payment verification failed - invalid signature'
+//           });
+//         }
+
+//         connection.release();
+//       } catch (error) {
+//         await connection.rollback();
+//         connection.release();
+//         throw error;
+//       }
+//     } else {
+//       // Mock mode
+//       res.json({
+//         success: isValid,
+//         message: isValid ? 'Payment verified (mock mode)' : 'Payment verification failed'
+//       });
+//     }
+//   } catch (error) {
+//     console.error('Error verifying payment:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to verify payment',
+//       error: error.message
+//     });
+//   }
+// });
+
+// app.post('/api/payments/failed', async (req, res) => {
+//   try {
+//     const { orderId, settlementId, error } = req.body;
+
+//     if (!orderId || !settlementId) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Order details are required'
+//       });
+//     }
+
+//     const settlementNumericId = parseInt(settlementId, 10);
+
+//     if (dbConnected) {
+//       const connection = await pool.getConnection();
+//       await connection.beginTransaction();
+
+//       try {
+//         // Update payment transaction as failed
+//         await connection.execute(
+//           `UPDATE payment_transactions 
+//            SET payment_status = 'failed',
+//                gateway_response = ?,
+//                updated_at = CURRENT_TIMESTAMP 
+//            WHERE transaction_id = ?`,
+//           [JSON.stringify({ error }), orderId]
+//         );
+
+//         // Update settlement as failed
+//         await connection.execute(
+//           `UPDATE settlements 
+//            SET payment_status = 'failed' 
+//            WHERE id = ?`,
+//           [settlementNumericId]
+//         );
+
+//         await connection.commit();
+//         connection.release();
+
+//         res.json({
+//           success: true,
+//           message: 'Payment failure recorded'
+//         });
+//       } catch (error) {
+//         await connection.rollback();
+//         connection.release();
+//         throw error;
+//       }
+//     } else {
+//       res.json({
+//         success: true,
+//         message: 'Payment failure recorded (mock mode)'
+//       });
+//     }
+//   } catch (error) {
+//     console.error('Error recording payment failure:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to record payment failure'
+//     });
+//   }
+// });
+
+// // Get transaction history for a group
+// app.get('/api/groups/:id/transactions', async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { page = 1, limit = 20 } = req.query;
+//     const offset = (page - 1) * limit;
+
+//     if (dbConnected) {
+//       const [transactions] = await pool.execute(
+//         `SELECT pt.*, 
+//                 m1.name as payer_name, 
+//                 m2.name as receiver_name,
+//                 s.date as settlement_date
+//          FROM payment_transactions pt
+//          LEFT JOIN members m1 ON pt.payer_id = m1.id
+//          LEFT JOIN members m2 ON pt.receiver_id = m2.id
+//          LEFT JOIN settlements s ON pt.settlement_id = s.id
+//          WHERE pt.group_id = ?
+//          ORDER BY pt.created_at DESC
+//          LIMIT ? OFFSET ?`,
+//         [id, parseInt(limit), parseInt(offset)]
+//       );
+
+//       const [countResult] = await pool.execute(
+//         'SELECT COUNT(*) as total FROM payment_transactions WHERE group_id = ?',
+//         [id]
+//       );
+
+//       res.json({
+//         success: true,
+//         data: {
+//           transactions,
+//           pagination: {
+//             page: parseInt(page),
+//             limit: parseInt(limit),
+//             total: countResult[0].total,
+//             totalPages: Math.ceil(countResult[0].total / limit)
+//           }
+//         }
+//       });
+//     } else {
+//       // Mock transaction data
+//       res.json({
+//         success: true,
+//         data: {
+//           transactions: [],
+//           pagination: {
+//             page: 1,
+//             limit: 20,
+//             total: 0,
+//             totalPages: 0
+//           }
+//         }
+//       });
+//     }
+//   } catch (error) {
+//     console.error('Error fetching transactions:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to fetch transaction history'
+//     });
+//   }
+// });
 
 // Start server
 app.listen(PORT, () => {
